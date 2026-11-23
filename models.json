@@ -1,0 +1,337 @@
+{
+ "models": [
+  {
+   "id": "coder-0.5b",
+   "name": "Qwen2.5-Coder 0.5B",
+   "tag": "qwen2.5-coder:0.5b",
+   "hf": "hf.co/Qwen/Qwen2.5-Coder-0.5B-Instruct-GGUF:Q4_K_M",
+   "sizeGB": 0.4,
+   "minRam": 2,
+   "minVram": 1,
+   "cpuThreads": 2,
+   "ctx": 2048,
+   "predict": 512,
+   "tools": false,
+   "coder": true,
+   "ui": "light",
+   "pc": {
+    "ru": "Очень старые и слабые ПК: Celeron/Pentium, старые i3, 2–4 ГБ ОЗУ",
+    "en": "Very old/weak PCs: Celeron/Pentium, old i3, 2–4 GB RAM"
+   },
+   "desc": {
+    "ru": "Минимальная модель. Простые подсказки и короткие правки, на сложное не рассчитывайте.",
+    "en": "Minimal model. Simple hints and short edits; do not expect much on hard tasks."
+   },
+   "tags": [
+    "coder",
+    "weak-pc",
+    "fast"
+   ]
+  },
+  {
+   "id": "coder-1.5b",
+   "name": "Qwen2.5-Coder 1.5B",
+   "tag": "qwen2.5-coder:1.5b",
+   "hf": "hf.co/Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF:Q4_K_M",
+   "sizeGB": 1.0,
+   "minRam": 4,
+   "minVram": 2,
+   "cpuThreads": 4,
+   "ctx": 4096,
+   "predict": 1024,
+   "tools": false,
+   "coder": true,
+   "ui": "light",
+   "pc": {
+    "ru": "Ноутбуки и офисные ПК: Core i3 (например 1005G1), Ryzen 3, 4–8 ГБ ОЗУ",
+    "en": "Laptops/office PCs: Core i3 (e.g. 1005G1), Ryzen 3, 4–8 GB RAM"
+   },
+   "desc": {
+    "ru": "Лучший баланс для слабого ПК: объяснения, небольшие функции, правки.",
+    "en": "Best balance for a weak PC: explanations, small functions, edits."
+   },
+   "tags": [
+    "coder",
+    "weak-pc"
+   ]
+  },
+  {
+   "id": "coder-3b",
+   "name": "Qwen2.5-Coder 3B",
+   "tag": "qwen2.5-coder:3b",
+   "hf": "hf.co/Qwen/Qwen2.5-Coder-3B-Instruct-GGUF:Q4_K_M",
+   "sizeGB": 1.9,
+   "minRam": 6,
+   "minVram": 3,
+   "cpuThreads": 6,
+   "ctx": 8192,
+   "predict": 2048,
+   "tools": false,
+   "coder": true,
+   "ui": "normal",
+   "pc": {
+    "ru": "Core i5 / Ryzen 5, 8–16 ГБ ОЗУ или видеокарта от 4 ГБ",
+    "en": "Core i5 / Ryzen 5, 8–16 GB RAM or a GPU with 4+ GB"
+   },
+   "desc": {
+    "ru": "Заметно умнее 1.5B; уверенное автодополнение и рефакторинг небольших файлов.",
+    "en": "Noticeably smarter than 1.5B; solid autocomplete and refactoring of small files."
+   },
+   "tags": [
+    "coder",
+    "balanced"
+   ]
+  },
+  {
+   "id": "coder-7b",
+   "name": "Qwen2.5-Coder 7B",
+   "tag": "qwen2.5-coder:7b",
+   "hf": "hf.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M",
+   "sizeGB": 4.7,
+   "minRam": 10,
+   "minVram": 6,
+   "cpuThreads": 12,
+   "ctx": 16384,
+   "predict": 4096,
+   "tools": true,
+   "coder": true,
+   "ui": "strong",
+   "pc": {
+    "ru": "Core i5/i7, Ryzen 5/7 с 16 ГБ ОЗУ; комфортно на видеокарте от 6 ГБ или Apple Silicon",
+    "en": "Core i5/i7, Ryzen 5/7 with 16 GB RAM; comfortable on a 6+ GB GPU or Apple Silicon"
+   },
+   "desc": {
+    "ru": "Хорошее качество кода и работа агента с инструментами.",
+    "en": "Good code quality and works as an agent with tools."
+   },
+   "tags": [
+    "coder",
+    "agent",
+    "strong"
+   ]
+  },
+  {
+   "id": "dsv2-16b",
+   "name": "DeepSeek-Coder-V2 16B (MoE)",
+   "tag": "deepseek-coder-v2:16b",
+   "hf": "",
+   "sizeGB": 8.9,
+   "minRam": 20,
+   "minVram": 10,
+   "cpuThreads": 8,
+   "ctx": 8192,
+   "predict": 2048,
+   "tools": false,
+   "coder": true,
+   "ui": "strong",
+   "pc": {
+    "ru": "16+ ГБ ОЗУ и 8+ потоков: MoE-модель быстра на процессоре; или видеокарта от 10 ГБ",
+    "en": "16+ GB RAM and 8+ threads: MoE runs fast on CPU; or a 10+ GB GPU"
+   },
+   "desc": {
+    "ru": "Очень сильная для кода MoE-модель (16B, но считает как ~2.4B): на процессоре заметно быстрее обычных моделей такого размера. Нужно много памяти.",
+    "en": "Very strong MoE coder (16B but computes like ~2.4B): noticeably faster on CPU than ordinary models of this size. Needs a lot of RAM."
+   },
+   "tags": [
+    "coder",
+    "strong"
+   ]
+  },
+  {
+   "id": "coder-14b",
+   "name": "Qwen2.5-Coder 14B",
+   "tag": "qwen2.5-coder:14b",
+   "hf": "hf.co/Qwen/Qwen2.5-Coder-14B-Instruct-GGUF:Q4_K_M",
+   "sizeGB": 9.0,
+   "minRam": 18,
+   "minVram": 11,
+   "cpuThreads": 16,
+   "ctx": 16384,
+   "predict": 4096,
+   "tools": true,
+   "coder": true,
+   "ui": "strong",
+   "pc": {
+    "ru": "Видеокарта от 12 ГБ (RTX 3060 12GB и выше), 32 ГБ ОЗУ, Mac с 24+ ГБ",
+    "en": "GPU with 12+ GB (RTX 3060 12GB or better), 32 GB RAM, Mac with 24+ GB"
+   },
+   "desc": {
+    "ru": "Сильная локальная модель для сложных задач.",
+    "en": "Strong local model for harder tasks."
+   },
+   "tags": [
+    "coder",
+    "agent",
+    "strong"
+   ]
+  },
+  {
+   "id": "coder-32b",
+   "name": "Qwen2.5-Coder 32B",
+   "tag": "qwen2.5-coder:32b",
+   "hf": "hf.co/Qwen/Qwen2.5-Coder-32B-Instruct-GGUF:Q4_K_M",
+   "sizeGB": 20,
+   "minRam": 40,
+   "minVram": 22,
+   "cpuThreads": 24,
+   "ctx": 16384,
+   "predict": 4096,
+   "tools": true,
+   "coder": true,
+   "ui": "strong",
+   "pc": {
+    "ru": "Рабочие станции: видеокарта 24 ГБ (RTX 3090/4090), 64 ГБ ОЗУ, Mac с 48+ ГБ",
+    "en": "Workstations: 24 GB GPU (RTX 3090/4090), 64 GB RAM, Mac with 48+ GB"
+   },
+   "desc": {
+    "ru": "Максимальное качество среди локальных вариантов каталога.",
+    "en": "Top quality among the local options in this catalog."
+   },
+   "tags": [
+    "coder",
+    "agent",
+    "strong"
+   ]
+  },
+  {
+   "id": "llama32-3b",
+   "name": "Llama 3.2 3B (general)",
+   "tag": "llama3.2:3b",
+   "hf": "",
+   "sizeGB": 2.0,
+   "minRam": 6,
+   "minVram": 3,
+   "cpuThreads": 6,
+   "ctx": 8192,
+   "predict": 2048,
+   "tools": true,
+   "coder": false,
+   "ui": "normal",
+   "pc": {
+    "ru": "Core i5 / Ryzen 5, 8 ГБ ОЗУ. Универсальная, не только для кода",
+    "en": "Core i5 / Ryzen 5, 8 GB RAM. General-purpose, not code-only"
+   },
+   "desc": {
+    "ru": "Для вопросов и текста; умеет вызывать инструменты, код слабее кодерских моделей.",
+    "en": "For questions and text; supports tool calls, weaker at code than coder models."
+   },
+   "tags": [
+    "general",
+    "agent",
+    "balanced"
+   ]
+  },
+  {
+   "id": "llama32-1b",
+   "name": "Llama 3.2 1B (general)",
+   "tag": "llama3.2:1b",
+   "hf": "",
+   "sizeGB": 1.3,
+   "minRam": 3,
+   "minVram": 2,
+   "cpuThreads": 2,
+   "ctx": 4096,
+   "predict": 1024,
+   "tools": true,
+   "coder": false,
+   "ui": "light",
+   "tags": [
+    "general",
+    "weak-pc",
+    "fast",
+    "agent"
+   ],
+   "pc": {
+    "ru": "Слабые ПК и ноутбуки, 4 ГБ ОЗУ. Универсальная",
+    "en": "Weak PCs and laptops, 4 GB RAM. General-purpose"
+   },
+   "desc": {
+    "ru": "Самая лёгкая универсальная модель с вызовом функций: простые вопросы, короткие тексты, команды агенту. Код пишет слабо.",
+    "en": "The lightest general model with tool calling: simple questions, short texts, agent commands. Weak at code."
+   }
+  },
+  {
+   "id": "gemma2-2b",
+   "name": "Gemma 2 2B (general)",
+   "tag": "gemma2:2b",
+   "hf": "",
+   "sizeGB": 1.6,
+   "minRam": 4,
+   "minVram": 3,
+   "cpuThreads": 4,
+   "ctx": 4096,
+   "predict": 1024,
+   "tools": false,
+   "coder": false,
+   "ui": "light",
+   "tags": [
+    "general",
+    "weak-pc"
+   ],
+   "pc": {
+    "ru": "Core i3 / Ryzen 3, 4–8 ГБ ОЗУ",
+    "en": "Core i3 / Ryzen 3, 4–8 GB RAM"
+   },
+   "desc": {
+    "ru": "Аккуратная небольшая модель от Google: хорошо пишет и объясняет текстом, для кода подойдёт Qwen-Coder.",
+    "en": "A tidy small Google model: good at writing and explaining; for code prefer Qwen-Coder."
+   }
+  },
+  {
+   "id": "phi3-mini",
+   "name": "Phi-3 Mini 3.8B (general)",
+   "tag": "phi3:mini",
+   "hf": "",
+   "sizeGB": 2.2,
+   "minRam": 6,
+   "minVram": 3,
+   "cpuThreads": 6,
+   "ctx": 4096,
+   "predict": 1024,
+   "tools": false,
+   "coder": false,
+   "ui": "normal",
+   "tags": [
+    "general",
+    "weak-pc",
+    "balanced"
+   ],
+   "pc": {
+    "ru": "Core i5 / Ryzen 5, 8 ГБ ОЗУ",
+    "en": "Core i5 / Ryzen 5, 8 GB RAM"
+   },
+   "desc": {
+    "ru": "Компактная модель от Microsoft с хорошими рассуждениями для своего размера; контекст небольшой.",
+    "en": "A compact Microsoft model with good reasoning for its size; small context."
+   }
+  },
+  {
+   "id": "mistral-7b",
+   "name": "Mistral 7B (general)",
+   "tag": "mistral:7b",
+   "hf": "",
+   "sizeGB": 4.1,
+   "minRam": 10,
+   "minVram": 6,
+   "cpuThreads": 12,
+   "ctx": 8192,
+   "predict": 2048,
+   "tools": true,
+   "coder": false,
+   "ui": "strong",
+   "tags": [
+    "general",
+    "agent",
+    "strong"
+   ],
+   "pc": {
+    "ru": "16 ГБ ОЗУ или видеокарта от 6 ГБ",
+    "en": "16 GB RAM or a 6+ GB GPU"
+   },
+   "desc": {
+    "ru": "Универсальная модель для общения и текстов, вызывает функции. Код пишет средне, лучше Qwen-Coder.",
+    "en": "General-purpose model for chat and texts, supports tool calls. Average at code; Qwen-Coder is better."
+   }
+  }
+ ]
+}

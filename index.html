@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="ru" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LocalCode</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header id="top">
+  <span class="brand"><span class="logo">&lt;/&gt;</span>LocalCode</span>
+  <button class="ghost" id="projBtn" data-i18n-title="proj">📁 …</button>
+  <div class="seg" id="modeSeg" data-i18n-title="m_title">
+    <button data-m="offline" data-i18n="m_offline">Офлайн</button><button data-m="online" data-i18n="m_online">Онлайн</button>
+  </div>
+  <span id="modelLabel"></span>
+  <span class="spacer"></span>
+  <button class="ghost" id="qoBtn"><span data-i18n="b_file">Файл…</span> <kbd>Ctrl+P</kbd></button>
+  <button class="ghost" id="runBtn" data-i18n-title="h_run"><span data-i18n="b_run">▶ Запуск</span> <kbd>F5</kbd></button>
+  <button class="ghost" id="dbgBtn" data-i18n-title="h_debug"><span data-i18n="b_debug">🐞 Отладка</span></button>
+  <button class="ghost" id="termBtn"><span data-i18n="b_term">Терминал</span> <kbd>Ctrl+`</kbd></button>
+  <button class="ghost" id="themeBtn" data-i18n-title="b_theme">◐</button>
+  <button class="ghost" id="langBtn" data-i18n-title="b_langtip">RU</button>
+  <button class="ghost" id="helpBtn" data-i18n-title="b_help">?</button>
+  <button id="settingsBtn" data-i18n="b_settings">Настройки</button>
+</header>
+
+<div id="app">
+  <aside id="side">
+    <div class="stabs"><button data-p="files" class="on" data-i18n="s_files">Файлы</button><button data-p="search" data-i18n="s_search">Поиск</button></div>
+    <div id="pFiles">
+      <div class="tools"><button class="ghost" id="newFile" data-i18n="b_newfile">＋ файл</button><button class="ghost" id="newDir" data-i18n="b_newdir">＋ папка</button><span class="spacer"></span><button class="ghost" id="refresh" data-i18n-title="b_refresh">⟳</button></div>
+      <div id="tree"></div>
+    </div>
+    <div id="pSearch" hidden>
+      <input type="search" id="sQ" data-i18n-ph="s_ph" placeholder="Найти в проекте и Enter">
+      <label class="chk sopt"><input type="checkbox" id="sRegex"> <span data-i18n="s_regex">Регулярное выражение</span></label>
+      <div id="sRes"></div>
+    </div>
+  </aside>
+  <div class="split" data-v="--sw" data-dir="1"></div>
+
+  <main id="center">
+    <div id="tabs"></div>
+    <div id="editorWrap">
+      <div id="gutter"><div id="gutIn"></div></div>
+      <div id="scroller">
+        <pre id="hl" aria-hidden="true"></pre>
+        <textarea id="editor" spellcheck="false" wrap="off" autocomplete="off" autocapitalize="off"></textarea>
+      </div>
+      <div id="inline" hidden>
+        <input type="text" id="inlInput" data-i18n-ph="i_ph" placeholder="Что сделать с кодом? Enter — выполнить, Esc — закрыть">
+        <div class="hint" id="inlHint" style="margin-top:4px"></div>
+        <div id="inlPrev" hidden>
+          <pre id="inlOut"></pre>
+          <div class="row"><button class="primary" id="inlOk" data-i18n="i_ok">Принять</button><button id="inlNo" data-i18n="i_no">Отклонить</button><span class="hint" id="inlState"></span></div>
+        </div>
+      </div>
+      <div id="empty"><div data-i18n-html="e_html">
+        <h2>LocalCode</h2>
+        Откройте файл слева или <b>Ctrl+P</b>.
+      </div></div>
+    </div>
+    <div class="splith" id="splitT" hidden></div>
+    <div id="term" hidden>
+      <div class="head" style="min-height:28px;padding:3px 10px"><b data-i18n="t_title">Терминал</b><span class="hint" id="cwd"></span><span class="spacer"></span><button class="ghost" id="termFix" hidden data-i18n="t_fix">Исправить с ИИ</button><button id="termStop" hidden data-i18n="t_stop">■ Стоп</button><select id="termShell" title="shell"><option value="cmd">cmd</option><option value="powershell">PowerShell</option></select><button class="ghost" id="clearTerm" data-i18n="t_clear">Очистить</button></div>
+      <pre id="termOut"></pre>
+      <div id="termIn"><span>$</span><input id="cmd" data-i18n-ph="t_ph" placeholder="команда и Enter" autocomplete="off"></div>
+    </div>
+  </main>
+
+  <div class="split" data-v="--cw" data-dir="-1"></div>
+  <section id="chat">
+    <div class="head">
+      <b data-i18n="c_title">ИИ</b>
+      <select id="chatMode"><option value="agent" data-i18n="c_agent">Агент</option><option value="ask" data-i18n="c_ask">Вопрос</option></select>
+      <span class="spacer"></span>
+      <button class="ghost" id="exportChat" data-i18n-title="c_export">⤓</button>
+      <button class="ghost" id="newChat" data-i18n="c_new">Новый чат</button>
+    </div>
+    <div id="log"></div>
+    <div id="composer">
+      <div id="quick"></div>
+      <div id="mention" hidden></div>
+      <textarea id="prompt" data-i18n-ph="c_ph" placeholder="Спросите или поручите задачу."></textarea>
+      <div class="row">
+        <label><input type="checkbox" id="ctxFile" checked> <span data-i18n="c_ctx">открытый файл</span></label>
+        <label><input type="checkbox" id="auto"> <span data-i18n="c_auto">без подтверждений</span></label>
+        <button class="ghost" id="mic" type="button" data-i18n-title="v_mic">🎤</button>
+        <span class="spacer"></span>
+        <button id="stop" hidden data-i18n="c_stop">Стоп</button>
+        <button class="primary" id="send" data-i18n="c_send">Отправить</button>
+      </div>
+    </div>
+  </section>
+</div>
+
+<footer id="status">
+  <span id="stPos"></span><span id="stLang"></span><span class="btn" id="stGit" hidden></span>
+  <span class="spacer"></span>
+  <span id="stAI"></span>
+  <span class="btn" id="stSave"></span>
+  <span class="btn" id="stAC"></span>
+  <span id="stMode"></span>
+</footer>
+
+<div id="menu" hidden></div>
+<div id="toast" hidden></div>
+
+<div class="overlay" id="qo"><div id="qoBox"><input type="text" id="qoIn" data-i18n-ph="q_ph" placeholder="Имя файла…" autocomplete="off"><div id="qoList"></div></div></div>
+
+<div class="overlay" id="help"><div id="helpCard">
+  <b style="font-size:15px" data-i18n="h_title">Горячие клавиши</b>
+  <div id="helpList"></div>
+  <div class="row" style="justify-content:flex-end;margin-top:6px"><button class="primary" id="helpClose" data-i18n="h_close">Закрыть</button></div>
+</div></div>
+
+<div class="overlay" id="modal"><div id="card">
+  <b style="font-size:15px" data-i18n="set_title">Настройки</b>
+  <div class="seg" id="setSeg" style="align-self:flex-start"><button data-m="offline" data-i18n="set_off">Офлайн (на этом ПК)</button><button data-m="online" data-i18n="set_on">Онлайн (облако, API-ключ)</button></div>
+  <fieldset><legend id="epLegend"></legend>
+    <label class="f"><span data-i18n="f_provider">Провайдер</span><select id="fPreset"></select></label>
+    <label class="f">Base URL<input type="text" id="fUrl"></label>
+    <label class="f"><span data-i18n="f_kind">Тип API</span><select id="fKind"><option value="openai" data-i18n="f_kind_oa">OpenAI-совместимый</option><option value="anthropic" data-i18n="f_kind_an">Anthropic (Claude)</option></select></label>
+    <label class="f"><span data-i18n="f_model">Модель</span>
+      <div class="row"><input type="text" id="fModel" list="modelList" style="flex:1"><button id="fLoad" type="button" data-i18n="f_list">Список</button></div>
+      <datalist id="modelList"></datalist>
+    </label>
+    <label class="f"><span data-i18n="f_key">API-ключи</span><textarea id="fKeys" rows="3" autocomplete="off" spellcheck="false" class="secret" data-i18n-ph="f_keys_ph"></textarea></label>
+    <div class="row"><label class="chk"><input type="checkbox" id="fKeysShow"> <span data-i18n="f_keys_show">Показать ключи</span></label><span class="spacer"></span><button type="button" id="fKeysTest" data-i18n="f_keys_test">Проверить все ключи</button><button type="button" id="fKeysReset" data-i18n="f_keys_reset">Сбросить паузы</button></div>
+    <div class="hint" id="fKeysRes"></div>
+    <label class="f"><span data-i18n="f_auth">Префикс авторизации (обычно Bearer)</span><input type="text" id="fAuth"></label>
+    <label class="chk"><input type="checkbox" id="fTools"> <span data-i18n="f_tools">Модель умеет вызывать функции (агент правит файлы сам)</span></label>
+    <div class="hint" id="fNote"></div>
+    <div class="row"><button id="fTest" type="button" data-i18n="f_test">Проверить подключение</button><span class="hint" id="fTestRes"></span></div>
+  </fieldset>
+  <fieldset id="catBox" hidden><legend data-i18n="cat_title">Офлайн-модели (запускаются на вашем ПК)</legend>
+    <div class="hint" id="catHw"></div>
+    <input type="search" id="catQ" data-i18n-ph="cat_search" placeholder="Поиск модели">
+    <div id="catTags" class="chips"></div>
+    <div id="catList"></div>
+  </fieldset>
+  <fieldset><legend data-i18n="g_general">Общие</legend>
+    <label class="f"><span data-i18n="f_profile">Производительность ПК</span>
+      <select id="fProfile"><option value="light" data-i18n="p_light">Слабый ПК</option><option value="normal" data-i18n="p_normal">Обычный</option><option value="strong" data-i18n="p_strong">Мощный</option></select></label>
+    <label class="chk"><input type="checkbox" id="fAC"> <span data-i18n="f_ac">Автодополнение кода по Tab</span></label>
+    <label class="chk"><input type="checkbox" id="fWeb"> <span data-i18n="f_web">Разрешить ИИ искать в интернете и читать страницы (запросы уходят в DuckDuckGo)</span></label>
+    <label class="chk"><input type="checkbox" id="fAutosave"> <span data-i18n="f_autosave">Автосохранение</span></label>
+    <label class="f"><span data-i18n="f_theme">Тема</span><select id="fTheme"><option value="dark" data-i18n="th_dark">Тёмная</option><option value="light" data-i18n="th_light">Светлая</option><option value="midnight" data-i18n="th_midnight">Полночь</option><option value="dracula" data-i18n="th_dracula">Фиолетовая</option><option value="forest" data-i18n="th_forest">Лесная</option><option value="sunset" data-i18n="th_sunset">Закат</option><option value="contrast" data-i18n="th_contrast">Высокий контраст</option></select></label>
+    <label class="f"><span data-i18n="f_lang">Язык интерфейса</span><select id="fLang"><option value="ru">Русский</option><option value="en">English</option></select></label>
+    <label class="f"><span data-i18n="f_sysprompt">Постоянный промпт</span><textarea id="fPrompt" rows="4" data-i18n-ph="f_sysprompt_ph"></textarea></label>
+    <label class="chk"><input type="checkbox" id="fVoiceSend"> <span data-i18n="f_vsend">Голос: отправлять сразу после распознавания</span></label>
+    <label class="chk"><input type="checkbox" id="fVoiceSpeak"> <span data-i18n="f_vspeak">Голос: озвучивать ответы ИИ</span></label>
+    <div class="hint" data-i18n="v_note"></div>
+  </fieldset>
+  <fieldset id="uiBox"><legend data-i18n="g_look">Оформление</legend>
+    <label class="f"><span data-i18n="f_accent">Акцентный цвет</span><div class="row"><input type="color" id="fAccent" value="#7c9cff"><div class="swatches" id="swatches"></div><button type="button" id="fAccentReset" data-i18n="f_accent_reset">Сбросить</button></div></label>
+    <div class="f2">
+      <label class="f"><span data-i18n="f_fs">Размер шрифта в редакторе</span><input type="range" id="fFs" min="10" max="24" step="1"></label>
+      <label class="f"><span data-i18n="f_lh">Межстрочный интервал</span><input type="range" id="fLh" min="1.2" max="2.2" step="0.05"></label>
+      <label class="f"><span data-i18n="f_cfs">Размер шрифта в чате</span><input type="range" id="fChatFs" min="11" max="20" step="1"></label>
+      <label class="f"><span data-i18n="f_radius">Скругление углов</span><input type="range" id="fRadius" min="0" max="16" step="1"></label>
+      <label class="f"><span data-i18n="f_font">Шрифт редактора</span><select id="fFont"><option value="" data-i18n="f_font_def">По умолчанию</option><option>JetBrains Mono</option><option>Cascadia Code</option><option>Fira Code</option><option>Consolas</option><option>Courier New</option><option>Menlo</option><option>monospace</option></select></label>
+      <label class="f"><span data-i18n="f_density">Плотность интерфейса</span><select id="fDensity"><option value="compact" data-i18n="d_compact">Компактная</option><option value="normal" data-i18n="d_normal">Обычная</option><option value="comfy" data-i18n="d_comfy">Свободная</option></select></label>
+      <label class="f"><span data-i18n="f_tab">Размер отступа (Tab)</span><select id="fTab"><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="8">8</option></select></label>
+    </div>
+    <div class="f2">
+      <label class="f"><span data-i18n="f_uifont">Шрифт интерфейса</span><select id="fUiFont"><option value="" data-i18n="f_font_def">По умолчанию</option><option>Segoe UI</option><option>Arial</option><option>Verdana</option><option>Tahoma</option><option>Trebuchet MS</option><option>Georgia</option><option>Calibri</option><option>Consolas</option></select></label>
+      <label class="f"><span data-i18n="f_ew">Толщина шрифта в редакторе</span><select id="fEw"><option value="300">300</option><option value="400">400</option><option value="500">500</option><option value="600">600</option><option value="700">700</option></select></label>
+      <label class="f"><span data-i18n="f_syntax">Цвета подсветки кода</span><select id="fSyntax"><option value="default" data-i18n="sx_default">Обычные</option><option value="solarized">Solarized</option><option value="monokai">Monokai</option><option value="github">GitHub</option><option value="pastel" data-i18n="sx_pastel">Пастельные</option><option value="mono" data-i18n="sx_mono">Без цветов</option></select></label>
+      <label class="f"><span data-i18n="f_chatstyle">Вид сообщений в чате</span><select id="fChatStyle"><option value="bubbles" data-i18n="cs_bubbles">Пузырьки</option><option value="flat" data-i18n="cs_flat">Плоский текст</option></select></label>
+      <label class="f"><span data-i18n="f_chatside">Где чат</span><select id="fChatSide"><option value="right" data-i18n="side_right">Справа</option><option value="left" data-i18n="side_left">Слева</option></select></label>
+      <label class="f"><span data-i18n="f_asms">Автосохранение через (мс)</span><input type="number" id="fAsMs" min="200" max="10000" step="100"></label>
+      <label class="f"><span data-i18n="f_acms">Задержка автодополнения (мс, 0 = по профилю)</span><input type="number" id="fAcMs" min="0" max="5000" step="100"></label>
+    </div>
+    <label class="chk"><input type="checkbox" id="fLig"> <span data-i18n="f_lig">Лигатуры в редакторе (например => как стрелка)</span></label>
+    <label class="chk"><input type="checkbox" id="fAnim"> <span data-i18n="f_anim">Анимации интерфейса</span></label>
+    <label class="chk"><input type="checkbox" id="fStatusBar"> <span data-i18n="f_statusbar">Показывать нижнюю строку состояния</span></label>
+    <label class="chk"><input type="checkbox" id="fWrapCode"> <span data-i18n="f_wrapcode">Переносить длинные строки кода в чате</span></label>
+    <label class="chk"><input type="checkbox" id="fSound"> <span data-i18n="f_sound">Звук, когда долгий ответ готов</span></label>
+    <label class="f"><span data-i18n="f_quicklist">Свои быстрые кнопки чата: по одной в строке, «Название | что попросить». Пусто — стандартные. {file} — имя открытого файла</span><textarea id="fQuickList" rows="3" spellcheck="false" class="secret show" placeholder="Кратко | Перескажи {file} в трёх предложениях"></textarea></label>
+    <label class="chk"><input type="checkbox" id="fNums"> <span data-i18n="f_nums">Показывать номера строк</span></label>
+    <label class="chk"><input type="checkbox" id="fQuick"> <span data-i18n="f_quick">Быстрые кнопки над полем ввода в чате</span></label>
+    <label class="f"><span data-i18n="f_css">Свой CSS (для продвинутых)</span><textarea id="fCss" rows="3" spellcheck="false" placeholder="#chat { font-family: Georgia; }"></textarea></label>
+    <div class="row"><button type="button" id="fUiReset" data-i18n="f_uireset">Сбросить оформление</button><span class="spacer"></span><button type="button" id="fExport" data-i18n="f_export">Сохранить настройки в файл</button><button type="button" id="fImport" data-i18n="f_import">Загрузить из файла</button><button type="button" id="fResetAll" data-i18n="f_resetall">Сбросить всё</button><input type="file" id="fImportFile" accept=".json,application/json" hidden></div>
+  </fieldset>
+  <fieldset id="voiceBox"><legend data-i18n="g_voice">Голос</legend>
+    <label class="f"><span data-i18n="f_vengine">Распознавание речи</span><select id="fVoiceEngine"><option value="whisper" data-i18n="ve_whisper">Офлайн (Whisper, без интернета)</option><option value="browser" data-i18n="ve_browser">Через браузер (нужен интернет)</option></select></label>
+    <label class="f"><span data-i18n="f_vsize">Точность офлайн-распознавания</span><select id="fSttSize"><option value="tiny" data-i18n="vs_tiny">Быстро (tiny)</option><option value="base" data-i18n="vs_base">Баланс (base)</option><option value="small" data-i18n="vs_small">Точнее, медленнее (small)</option></select></label>
+    <div class="row"><span class="hint" id="vState"></span><span class="spacer"></span><button type="button" id="vInstall" data-i18n="v_install">Скачать</button><button type="button" id="vRemove" data-i18n="v_remove">Удалить</button></div>
+    <label class="chk"><input type="checkbox" id="fVoiceAuto"> <span data-i18n="f_vauto">Останавливать запись после паузы в речи</span></label>
+  </fieldset>
+  <div class="row" style="justify-content:flex-end"><button id="setCancel" data-i18n="cancel">Отмена</button><button class="primary" id="setSave" data-i18n="save">Сохранить</button></div>
+</div></div>
+
+<script src="/highlight.js"></script>
+<script src="/i18n.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>
