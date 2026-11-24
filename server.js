@@ -7,6 +7,8 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
+const net = require('net');
+const dns = require('dns').promises;
 const { exec, execFile, spawn } = require('child_process');
 const hwlib = require('./hw');
 
@@ -28,21 +30,42 @@ process.on('unhandledRejection', (e) => log('unhandledRejection:', e && e.stack 
 const IGNORE = new Set(['node_modules', '.git', '__pycache__', '.venv', 'venv', 'dist', 'build', '.next', '.DS_Store', '.idea', '.vscode']);
 
 /* ---------- конфиг пользователя (~/.localcode/config.json) ---------- */
-const CFG_DIR = path.join(os.homedir(), '.localcode');
+const CFG_DIR = process.env.LOCALCODE_CONFIG_DIR ? path.resolve(process.env.LOCALCODE_CONFIG_DIR) : path.join(os.homedir(), '.localcode');
 const CFG_FILE = path.join(CFG_DIR, 'config.json');
 let conf = {};
-try { conf = JSON.parse(fs.readFileSync(CFG_FILE, 'utf8')); } catch {}
-const saveConf = () => { try { fs.mkdirSync(CFG_DIR, { recursive: true }); fs.writeFileSync(CFG_FILE, JSON.stringify(conf, null, 2)); } catch {} };
+/* Папка настроек доступна только владельцу: там лежат история проектов, профиль браузера и модели речи. */
+const secureDir = (dir) => { try { fs.mkdirSync(dir, { recursive: true, mode: 0o700 }); if (process.platform !== 'win32') fs.chmodSync(dir, 0o700); } catch {} };
+const secureFile = (file) => { if (process.platform !== 'win32') { try { fs.chmodSync(file, 0o600); } catch {} } };
+secureDir(CFG_DIR);
+try {
+  conf = JSON.parse(fs.readFileSync(CFG_FILE, 'utf8'));
+  if (!conf || typeof conf !== 'object' || Array.isArray(conf)) conf = {};
+  conf.recent = (Array.isArray(conf.recent) ? conf.recent : []).filter(x => typeof x === 'string' && x.length > 0 && x.length < 4096).slice(0, 8);
+  if (!conf.defaults || typeof conf.defaults !== 'object' || Array.isArray(conf.defaults)) delete conf.defaults;
+  secureFile(CFG_FILE);
+} catch { conf = {}; }
+const saveConf = () => {
+  const tmp = CFG_FILE + '.' + process.pid + '.tmp';
+  try {
+    secureDir(CFG_DIR);
+    fs.writeFileSync(tmp, JSON.stringify(conf, null, 2), { mode: 0o600 });
+    secureFile(tmp);
+    fs.renameSync(tmp, CFG_FILE);   // атомарная запись: файл не останется «полузаписанным»
+  } catch { try { fs.unlinkSync(tmp); } catch {} }
+};
 
 let ROOT;
 function setRoot(p) {
-  ROOT = path.resolve(p);
+  let dir = path.resolve(String(p || ''));
+  if (isSystemDir(dir)) {                    // /etc, C:\Windows и т. п. папкой проекта быть не могут
+    log('root rejected (system folder):', dir);
+    dir = path.join(os.homedir(), 'LocalCodeProjects');
+  }
+  ROOT = dir;
   fs.mkdirSync(ROOT, { recursive: true });
   conf.recent = [ROOT, ...(conf.recent || []).filter(x => x !== ROOT)].slice(0, 8);
   saveConf();
 }
-const lastProject = (conf.recent || []).find(p => fs.existsSync(p));
-setRoot(positional[0] || lastProject || path.join(os.homedir(), 'LocalCodeProjects'));
 
 /* ---------- файловые операции ---------- */
 const firstDir = (names, fb) => names.map(n => path.join(os.homedir(), ...n)).find(d => fs.existsSync(d)) || path.join(os.homedir(), fb);
@@ -54,36 +77,93 @@ function expandHome(x) {
   if (dm) { const k = dm[1].toLowerCase(); return path.join(/desktop|стол/.test(k) ? deskDir() : /doc|докум/.test(k) ? docDir() : dlDir(), dm[2] || ''); }
   return x.replace(/^~(?=$|[\\/])/, os.homedir());
 }
-let ANY = false;   // true только на время вызова инструментов агента: тогда разрешены пути в домашней папке
-const PROTECTED = /[\\/](windows|program files( \(x86\))?|programdata|\.ssh|appdata)([\\/]|$)/i;
+// Системные и секретные папки: инструменты агента не имеют к ним доступа даже при работе в домашней папке.
+const PROTECTED = /[\\/](windows|program files( \(x86\))?|programdata|system32|syswow64|\.ssh|\.gnupg|\.aws|\.azure|\.kube|\.docker|\.config|\.localcode|appdata|library[\\/]keychains|\.password-store|\.mozilla|\.thunderbird)([\\/]|$)/i;
 const deskDir = () => [['Desktop'], ['OneDrive', 'Desktop'], ['Рабочий стол'], ['OneDrive', 'Рабочий стол']].map(a => path.join(os.homedir(), ...a)).find(d => fs.existsSync(d)) || path.join(os.homedir(), 'Desktop');
 const inside = (full, base) => { const a = process.platform === 'win32' ? full.toLowerCase() : full, b = process.platform === 'win32' ? base.toLowerCase() : base; return a === b || a.startsWith(b + path.sep); };
-function safe(p) {
-  if (ANY && p) {
+const OUTSIDE = () => new Error(T('Путь вне разрешённой папки', 'Path is outside the allowed folder'));
+const OUTSIDE_HOME = () => new Error(T('Путь вне домашней папки', 'Path is outside the home folder'));
+const PROTECTED_ERR = () => new Error(T('Эта системная папка защищена', 'This system folder is protected'));
+const SYSTEM_DIR = /^(?:\/(?:etc|usr|bin|sbin|lib|lib32|lib64|libx32|boot|dev|proc|sys|root|private|system|library|cores|var\/lib)(?:\/|$)|[a-z]:[\\/](?:windows|program files(?: \(x86\))?|programdata)(?:[\\/]|$))/i;
+const PROTECTED_NAME = /^(windows|program files( \(x86\))?|programdata|system32|syswow64|\.ssh|\.gnupg|\.aws|\.azure|\.kube|\.docker|\.config|\.localcode|appdata|keychains|\.password-store|\.mozilla|\.thunderbird)$/i;
+const SENSITIVE_DIR = /[\\/](\.ssh|\.gnupg|\.aws|\.azure|\.kube|\.docker|\.localcode|\.config|library[\\/]keychains|\.password-store|\.mozilla|\.thunderbird)([\\/]|$)/i;
+function isSystemDir(dir) {
+  const d = path.resolve(String(dir || ''));
+  if (d === path.parse(d).root) return true;                       // корень диска или /
+  if (d === os.homedir() || d === path.dirname(os.homedir())) return true;
+  if (PROTECTED_NAME.test(path.basename(d))) return true;          // сама защищённая папка (AppData, .ssh…)
+  if (SENSITIVE_DIR.test(d + path.sep)) return true;               // и всё внутри секретных папок
+  return SYSTEM_DIR.test(d + path.sep);                            // системные каталоги и всё внутри них
+}
+/* Папка проекта: аргумент командной строки, последний проект или ~/LocalCodeProjects. */
+const lastProject = (conf.recent || []).find(p => typeof p === 'string' && fs.existsSync(p) && !isSystemDir(p));
+setRoot(positional[0] || lastProject || path.join(os.homedir(), 'LocalCodeProjects'));
+const ABS_ERR = () => new Error(T('Абсолютные пути вне проекта не поддерживаются. Укажите путь внутри проекта, ~/Desktop/имя, ~/Documents/имя или ~/Downloads/имя', 'Absolute paths outside the project are not supported. Use a path inside the project, ~/Desktop/name, ~/Documents/name or ~/Downloads/name'));
+const SYMLINK_ERR = () => new Error(T('Символическая ссылка ведёт за пределы разрешённой папки', 'A symbolic link points outside the allowed folder'));
+
+/* Настоящий путь без символических ссылок. Проверяем ближайшего существующего предка:
+   так блокируется и ссылка на папку, и запись нового файла через ссылку. */
+const realOf = (p) => { try { return (fs.realpathSync.native || fs.realpathSync)(p); } catch { return null; } };
+function canonicalPath(full) {
+  let probe = path.resolve(full), rest = '';
+  for (let i = 0; i < 64 && !fs.existsSync(probe); i++) {
+    const parent = path.dirname(probe); if (parent === probe) break;
+    rest = rest ? path.join(path.basename(probe), rest) : path.basename(probe);
+    probe = parent;
+  }
+  const rp = realOf(probe); if (!rp) return null;
+  return rest ? path.join(rp, rest) : rp;
+}
+function realInside(full, base) {
+  const rb = realOf(path.resolve(base)), t = canonicalPath(full);
+  return !!(rb && t && inside(t, rb));
+}
+/* Файлы с ключами и паролями: агент их не читает и не меняет (пользователь может открыть их в редакторе сам). */
+const SECRET_BASE = /^(\.env|\.env\.(local|development|dev|production|prod|test|staging)|\.netrc|\.git-credentials|\.npmrc|\.pypirc|credentials\.json|secrets?\.(json|ya?ml|txt)|id_(rsa|dsa|ecdsa|ed25519)(\.pub)?)$/i;
+const SECRET_EXT = /\.(pem|key|p12|pfx|keystore|jks|asc|gpg)$/i;
+function isSecretFile(full) {
+  const s = String(full || ''), base = path.basename(s);
+  if (SECRET_BASE.test(base) || SECRET_EXT.test(base)) return true;
+  // .git/config может содержать токен в адресе удалённого репозитория
+  return /[\\/]\.git[\\/](config|credentials|hooks)([\\/]|$)/i.test(s);
+}
+const SECRET_ERR = () => new Error(T('Это файл с секретами (ключи, пароли). Агент к таким файлам не допускается — откройте его вручную в редакторе.', 'This file contains secrets (keys, passwords). The agent may not touch such files — open it manually in the editor.'));
+const assertNotSecret = (full, allowHome) => {
+  if (!allowHome) return;
+  if (isSecretFile(full) || isSecretFile(canonicalPath(full) || '')) throw SECRET_ERR();
+};
+function safe(p, allowHome = false) {
+  if (allowHome && p) {
     let x = String(p).trim();
     x = expandHome(x);
     if (path.isAbsolute(x)) {
       const full = path.resolve(x);
-      if (PROTECTED.test(full + path.sep)) throw new Error(T('Эта системная папка защищена', 'This system folder is protected'));
-      if (inside(full, os.homedir()) || inside(full, ROOT)) return full;
-      throw new Error(T('Путь вне домашней папки', 'Path is outside the home folder'));
+      if (PROTECTED.test(full + path.sep) && !inside(full, ROOT)) throw PROTECTED_ERR();
+      const base = inside(full, ROOT) ? ROOT : os.homedir();
+      if (!inside(full, os.homedir()) && !inside(full, ROOT)) throw OUTSIDE_HOME();
+      if (!realInside(full, base)) throw SYMLINK_ERR();
+      const canon = canonicalPath(full);
+      if (canon && PROTECTED.test(canon + path.sep) && !inside(canon, ROOT)) throw PROTECTED_ERR();
+      return full;
     }
   }
   if (p && path.isAbsolute(String(p))) {   // абсолютный путь допустим только внутри проекта; иначе понятная ошибка вместо тихой подмены
     const abs = path.resolve(String(p));
-    if (inside(abs, ROOT)) return abs;
-    throw new Error(T('Абсолютные пути вне проекта не поддерживаются. Укажите путь внутри проекта, ~/Desktop/имя, ~/Documents/имя или ~/Downloads/имя', 'Absolute paths outside the project are not supported. Use a path inside the project, ~/Desktop/name, ~/Documents/name or ~/Downloads/name'));
+    if (!inside(abs, ROOT)) throw ABS_ERR();
+    if (!realInside(abs, ROOT)) throw SYMLINK_ERR();
+    return abs;
   }
   const full = path.resolve(ROOT, '.' + path.sep + (p || ''));
-  if (full !== ROOT && !full.startsWith(ROOT + path.sep)) throw new Error(T('Путь вне рабочей папки', 'Path is outside the project folder'));
+  if (full !== ROOT && !inside(full, ROOT)) throw OUTSIDE();
+  if (!realInside(full, ROOT)) throw SYMLINK_ERR();
   return full;
 }
 const rel = (f) => { const r = path.relative(ROOT, f); return (r.startsWith('..') || path.isAbsolute(r)) ? f : r.split(path.sep).join('/'); };
 
-function listDir(p) {
-  const dir = safe(p);
+function listDir(p, allowHome = false) {
+  const dir = safe(p, allowHome);
   return fs.readdirSync(dir, { withFileTypes: true })
-    .filter(e => !IGNORE.has(e.name))
+    .filter(e => !IGNORE.has(e.name) && !(allowHome && isSecretFile(path.join(dir, e.name))))
     .map(e => ({ name: e.name, path: rel(path.join(dir, e.name)), dir: e.isDirectory() }))
     .sort((a, b) => b.dir - a.dir || a.name.localeCompare(b.name));
 }
@@ -100,21 +180,24 @@ function allFiles(limit = 6000) {
   })(ROOT);
   return out;
 }
-function readFile(p) {
-  const f = safe(p);
+function readFile(p, allowHome = false) {
+  const f = safe(p, allowHome);
+  assertNotSecret(f, allowHome);
   if (fs.statSync(f).size > 2 * 1024 * 1024) throw new Error(T('Файл больше 2 МБ', 'File is larger than 2 MB'));
   return fs.readFileSync(f, 'utf8');
 }
-function writeFile(p, content) {
-  const f = safe(p);
+function writeFile(p, content, allowHome = false) {
+  const f = safe(p, allowHome);
+  assertNotSecret(f, allowHome);
   const before = fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : null;
   fs.mkdirSync(path.dirname(f), { recursive: true });
   fs.writeFileSync(f, content, 'utf8');
   return before;
 }
-function replaceInFile(p, oldStr, newStr) {
+function replaceInFile(p, oldStr, newStr, allowHome = false) {
   if (typeof oldStr !== 'string' || oldStr === '') throw new Error(T('old_str пустой: укажите фрагмент, который нужно заменить', 'old_str is empty: give the fragment to replace'));
-  const f = safe(p);
+  const f = safe(p, allowHome);
+  assertNotSecret(f, allowHome);
   const text = fs.readFileSync(f, 'utf8');
   const count = text.split(oldStr).length - 1;
   if (count === 0) throw new Error(T('old_str не найден в файле', 'old_str not found in the file'));
@@ -123,8 +206,9 @@ function replaceInFile(p, oldStr, newStr) {
   return text;
 }
 // Применение diff-патча (unified diff): удобно, когда нужно изменить несколько мест файла за раз
-function applyPatch(p, patch) {
-  const f = safe(p), text = fs.readFileSync(f, 'utf8'), eol = text.includes('\r\n') ? '\r\n' : '\n';
+function applyPatch(p, patch, allowHome = false) {
+  const f = safe(p, allowHome); assertNotSecret(f, allowHome);
+  const text = fs.readFileSync(f, 'utf8'), eol = text.includes('\r\n') ? '\r\n' : '\n';
   const src = String(patch || '').replace(/\r\n/g, '\n').replace(/\n+$/, '').split('\n'), hunks = []; let cur = null;
   for (const l of src) {
     if (/^@@/.test(l)) { const m = l.match(/^@@ -(\d+)/); cur = { old: [], neu: [], at: m ? +m[1] - 1 : 0 }; hunks.push(cur); continue; }
@@ -149,12 +233,18 @@ function applyPatch(p, patch) {
   return text;
 }
 function lineMatcher(query, regex) {
-  if (regex) { try { const re = new RegExp(query, 'i'); return (l) => re.test(l); } catch (e) { throw new Error(T('Неверное регулярное выражение: ', 'Invalid regular expression: ') + e.message); } }
+  if (regex) {
+    if (String(query).length > 200) throw new Error(T('Слишком длинное регулярное выражение (максимум 200 символов)', 'Regular expression is too long (200 characters max)'));
+    try { const re = new RegExp(query, 'i'); return (l) => re.test(l); } catch (e) { throw new Error(T('Неверное регулярное выражение: ', 'Invalid regular expression: ') + e.message); }
+  }
   const q = query.toLowerCase(); return (l) => l.toLowerCase().includes(q);
 }
 // Простая поддержка .gitignore: имена, маски *.ext, каталоги/
 function gitignoreFilter() {
-  let rules = []; try { rules = fs.readFileSync(path.join(ROOT, '.gitignore'), 'utf8').split(/\r?\n/).map(x => x.trim()).filter(x => x && !x.startsWith('#') && !x.startsWith('!')); } catch {}
+  let rules = []; try {
+    const gi = path.join(ROOT, '.gitignore');
+    if (fs.lstatSync(gi).isFile()) rules = fs.readFileSync(gi, 'utf8').split(/\r?\n/).map(x => x.trim()).filter(x => x && !x.startsWith('#') && !x.startsWith('!'));
+  } catch {}
   const res = rules.map(r => {
     const dirOnly = r.endsWith('/'), a = r.replace(/^\//, '').replace(/\/$/, '');
     const body = a.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*\*/g, '\u0001').replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]').replace(/\u0001/g, '.*');
@@ -162,7 +252,7 @@ function gitignoreFilter() {
   });
   return (relPath, isDir) => res.some(re => re.test(isDir ? relPath + '/' : relPath));
 }
-function search(query, p, regex) {
+function search(query, p, regex, allowHome = false) {
   if (!query || !String(query).trim()) throw new Error(T('Пустой запрос поиска', 'Empty search query'));
   const out = [], test = lineMatcher(String(query), regex), ignored = gitignoreFilter();
   (function walk(dir) {
@@ -170,15 +260,17 @@ function search(query, p, regex) {
     for (const e of list) {
       if (out.length >= 200) return;
       if (IGNORE.has(e.name)) continue;
+      if (e.isSymbolicLink()) continue;                // не идём по ссылкам: они могут вести за пределы проекта
       const full = path.join(dir, e.name), r = rel(full);
       if (ignored(r, e.isDirectory())) continue;
+      if (allowHome && isSecretFile(full)) continue;   // секреты не попадают в результаты поиска агента
       if (e.isDirectory()) { walk(full); continue; }
       try {
         if (fs.statSync(full).size > 1024 * 1024) continue;
         fs.readFileSync(full, 'utf8').split('\n').forEach((line, i) => { if (out.length < 200 && test(line)) out.push(`${r}:${i + 1}: ${line.trim().slice(0, 200)}`); });
       } catch {}
     }
-  })(safe(p || ''));
+  })(safe(p || '', allowHome));
   return out.join('\n') || T('Ничего не найдено', 'Nothing found');
 }
 // Поиск в интернете (по желанию: включается в настройках) и чтение страниц. Через DuckDuckGo HTML, без ключей.
@@ -200,21 +292,98 @@ async function webSearch(q) {
   const res = parseDdg(await r.text());
   return res.length ? res.join('\n') : T('Ничего не найдено', 'Nothing found');
 }
-const isPrivateHost = (h) => /^(localhost|.*\.local|.*\.internal)$/i.test(h) || /^(127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|0\.|::1$|\[::1\]|fc|fd|fe80)/i.test(h);
+const PRIVATE_ERR = () => new Error(T('Адреса внутри вашего компьютера и сети закрыты', 'Local and private network addresses are blocked'));
+const stripHost = (h) => String(h || '').trim().replace(/\.$/, '').replace(/^\[|\]$/g, '').toLowerCase();
+function isPrivateIp(ip) {
+  const s = stripHost(ip).replace(/%.*$/, '');
+  if (net.isIPv4(s)) {
+    const o = s.split('.').map(Number);
+    if (o[0] === 0 || o[0] === 10 || o[0] === 127) return true;
+    if (o[0] === 169 && o[1] === 254) return true;                       // link-local, облачные метаданные
+    if (o[0] === 172 && o[1] >= 16 && o[1] <= 31) return true;
+    if (o[0] === 192 && o[1] === 168) return true;
+    if (o[0] === 100 && o[1] >= 64 && o[1] <= 127) return true;          // CGNAT
+    if (o[0] === 192 && o[1] === 0 && o[2] === 0) return true;
+    if (o[0] === 198 && (o[1] === 18 || o[1] === 19)) return true;       // тестовые сети
+    return o[0] >= 224;                                                  // multicast и зарезервированные
+  }
+  if (net.isIPv6(s)) {
+    if (s === '::' || s === '::1') return true;
+    const m = s.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/); if (m) return isPrivateIp(m[1]);
+    const first = parseInt((s.split(':')[0] || '0') || '0', 16) || 0;
+    if ((first & 0xfe00) === 0xfc00) return true;                        // fc00::/7 (уникальные локальные)
+    if ((first & 0xffc0) === 0xfe80) return true;                        // fe80::/10 (link-local)
+    if ((first & 0xff00) === 0xff00) return true;                        // multicast
+    return false;
+  }
+  return false;
+}
+function isPrivateHost(h) {
+  const s = stripHost(h);
+  if (!s) return true;
+  if (s === 'localhost' || s.endsWith('.localhost') || s.endsWith('.local') || s.endsWith('.internal') || s === 'metadata' || s === 'metadata.google.internal' || s === 'instance-data') return true;
+  if (/^\d+$/.test(s) || /^0x[0-9a-f]+$/i.test(s)) return true;   // десятичный или hex-адрес вроде 2130706433
+  if (net.isIP(s)) return isPrivateIp(s);
+  return false;
+}
+/* Проверка ссылки перед запросом: протокол, адрес и все DNS-ответы. Локальная сеть недоступна. */
+async function assertPublicUrl(u) {
+  if (!/^https?:$/.test(u.protocol)) throw new Error(T('Разрешены только http и https', 'Only http and https are allowed'));
+  const host = stripHost(u.hostname);
+  if (isPrivateHost(host)) throw PRIVATE_ERR();
+  if (net.isIP(host)) return;
+  let addrs;
+  try { addrs = await dns.lookup(host, { all: true, verbatim: true }); }
+  catch { throw new Error(T('Адрес не найден: ', 'Address not found: ') + host); }
+  if (!addrs.length || addrs.some(a => isPrivateIp(a.address))) throw PRIVATE_ERR();
+}
+/* Адрес сервера модели задаёт сам пользователь (в том числе Ollama на этом ПК), поэтому LAN разрешён,
+   но облачные метаданные и link-local закрыты — иначе через настройки можно было бы увести токен облака. */
+const isMetadataTarget = (host) => /^(169\.254\.169\.254|100\.100\.100\.200|metadata|metadata\.google\.internal|instance-data)$/i.test(host)
+  || /^169\.254\./.test(host) || /^fe80:/i.test(host) || /^fd00:ec2/i.test(host);
+async function assertProviderUrl(cfg) {
+  const base = baseOf(cfg || {});
+  let u; try { u = new URL(base); } catch { throw new Error(T('Неверный Base URL в настройках', 'Invalid Base URL in settings')); }
+  if (!/^https?:$/.test(u.protocol)) throw new Error(T('Base URL должен начинаться с http:// или https://', 'Base URL must start with http:// or https://'));
+  if (u.username || u.password) throw new Error(T('В Base URL не должно быть логина и пароля', 'Base URL must not contain a username or password'));
+  if (isMetadataTarget(stripHost(u.hostname))) throw new Error(T('Этот адрес в настройках не разрешён', 'This address is not allowed in settings'));
+}
 function htmlToText(html) {
   const t = String(html).replace(/<(script|style|noscript|svg|head)[\s\S]*?<\/\1>/gi, ' ').replace(/<(br|p|div|li|h[1-6]|tr)[^>]*>/gi, '\n').replace(/<[^>]*>/g, '')
     .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#x27;|&#39;/g, "'").replace(/&nbsp;/g, ' ');
   return t.replace(/[ \t]+/g, ' ').replace(/ ?\n ?/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
 }
+const MAX_FETCH_BYTES = 1.5e6;
+async function readCapped(resp, max) {
+  if (!resp.body) return Buffer.alloc(0);
+  const chunks = []; let size = 0;
+  for await (const c of resp.body) {
+    const buf = Buffer.from(c), left = max - size;
+    if (left <= 0) break;
+    chunks.push(buf.subarray(0, left)); size += Math.min(buf.length, left);
+    if (size >= max) break;
+  }
+  try { await resp.body.cancel(); } catch {}
+  return Buffer.concat(chunks, size);
+}
 async function fetchUrl(u) {
   let url; try { url = new URL(String(u)); } catch { throw new Error(T('Неверная ссылка', 'Invalid URL')); }
-  if (!/^https?:$/.test(url.protocol)) throw new Error(T('Разрешены только http и https', 'Only http and https are allowed'));
-  if (isPrivateHost(url.hostname)) throw new Error(T('Адреса внутри вашего компьютера и сети закрыты', 'Local and private network addresses are blocked'));
-  const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (LocalCode)' }, signal: AbortSignal.timeout(15000), redirect: 'follow' });
-  if (!r.ok) throw new Error('HTTP ' + r.status);
-  const buf = Buffer.from(await r.arrayBuffer()).subarray(0, 1.5e6), text = buf.toString('utf8');
-  const out = /html/i.test(r.headers.get('content-type') || '') ? htmlToText(text) : text;
-  return out.slice(0, 12000) || T('Пустая страница', 'Empty page');
+  for (let hop = 0; hop <= 5; hop++) {              // каждое перенаправление проверяем заново
+    await assertPublicUrl(url);
+    const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (LocalCode)' }, signal: AbortSignal.timeout(15000), redirect: 'manual' });
+    if ([301, 302, 303, 307, 308].includes(r.status)) {
+      const loc = r.headers.get('location');
+      try { await r.body?.cancel(); } catch {}
+      if (!loc) throw new Error('HTTP ' + r.status);
+      try { url = new URL(loc, url); } catch { throw new Error(T('Неверная ссылка', 'Invalid URL')); }
+      continue;
+    }
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const buf = await readCapped(r, MAX_FETCH_BYTES), text = buf.toString('utf8');
+    const out = /html/i.test(r.headers.get('content-type') || '') ? htmlToText(text) : text;
+    return out.slice(0, 12000) || T('Пустая страница', 'Empty page');
+  }
+  throw new Error(T('Слишком много перенаправлений', 'Too many redirects'));
 }
 const UTF_ENV = { ...process.env, PYTHONUNBUFFERED: '1', PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' };
 function wrapShell(command, ps) {
@@ -224,8 +393,9 @@ function wrapShell(command, ps) {
 function run(command, timeoutSec = 60, shell) {
   if (!command || !String(command).trim()) return Promise.reject(new Error(T('Пустая команда', 'Empty command')));
   const ps = process.platform === 'win32' && /^p(ower)?s/i.test(shell || '');
+  const sec = Math.min(1800, Math.max(1, Number(timeoutSec) || 60));   // не больше 30 минут
   return new Promise((resolve) => {
-    exec(wrapShell(command, ps), { cwd: ROOT, env: UTF_ENV, shell: ps ? 'powershell.exe' : undefined, timeout: timeoutSec * 1000, maxBuffer: 4 * 1024 * 1024, windowsHide: true },
+    exec(wrapShell(command, ps), { cwd: ROOT, env: UTF_ENV, shell: ps ? 'powershell.exe' : undefined, timeout: sec * 1000, maxBuffer: 4 * 1024 * 1024, windowsHide: true },
       (err, stdout, stderr) => {
         let text = (stdout || '') + (stderr ? '\n[stderr]\n' + stderr : '');
         if (err && err.killed) text += T('\n[процесс остановлен по таймауту]', '\n[process stopped: timeout]');
@@ -236,7 +406,7 @@ function run(command, timeoutSec = 60, shell) {
   });
 }
 /* ---------- открытие страниц и файлов в программе по умолчанию (музыка, видео, сайты, папки) ---------- */
-const NO_OPEN_EXT = new Set(['.exe', '.bat', '.cmd', '.com', '.msi', '.ps1', '.psm1', '.vbs', '.vbe', '.js', '.jse', '.wsf', '.hta', '.scr', '.lnk', '.reg', '.dll', '.cpl', '.jar', '.sh', '.command', '.app', '.appimage', '.desktop']);
+const NO_OPEN_EXT = new Set(['.exe', '.bat', '.cmd', '.com', '.msi', '.ps1', '.psm1', '.vbs', '.vbe', '.js', '.mjs', '.cjs', '.jse', '.wsf', '.hta', '.scr', '.lnk', '.url', '.webloc', '.reg', '.dll', '.cpl', '.jar', '.sh', '.command', '.app', '.appimage', '.desktop', '.html', '.htm', '.xhtml', '.svg', '.scpt', '.appref-ms']);
 function osOpen(arg) {
   const c = process.platform === 'win32' ? ['rundll32', ['url.dll,FileProtocolHandler', arg]] : process.platform === 'darwin' ? ['open', [arg]] : ['xdg-open', [arg]];
   return new Promise((resolve, reject) => {
@@ -254,7 +424,7 @@ async function openTarget(target) {
     if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new Error(T('Разрешены только ссылки http и https', 'Only http and https links are allowed'));
     await osOpen(u.href); return u.href;
   }
-  const full = path.resolve(ROOT, expandHome(target));
+  const full = safe(target, true);      // только проект или домашняя папка, без системных каталогов
   if (fs.existsSync(full)) {
     if (!fs.statSync(full).isDirectory() && NO_OPEN_EXT.has(path.extname(full).toLowerCase()))
       throw new Error(T('Программы и скрипты этим инструментом не запускаются — используйте run_command (потребуется подтверждение).', 'Programs and scripts are not launched with this tool — use run_command (it asks for confirmation).'));
@@ -326,19 +496,18 @@ function deleteToTrash(full) {
   }
   fs.rmSync(full, { recursive: true, force: true }); return Promise.resolve(T('Удалено: ', 'Deleted: ') + full);
 }
-const withAny = (f) => { ANY = true; try { return f(); } finally { ANY = false; } };
 async function tool(name, a) {
   switch (name) {
-    case 'make_dir': return withAny(() => { const f = safe(a.path); fs.mkdirSync(f, { recursive: true }); return { result: T('Папка создана: ', 'Folder created: ') + f }; });
-    case 'delete_path': { const f = withAny(() => safe(a.path)); if (!fs.existsSync(f)) throw new Error(T('Не найдено: ', 'Not found: ') + f); return { result: await deleteToTrash(f) }; }
+    case 'make_dir': { const f = safe(a.path, true); fs.mkdirSync(f, { recursive: true }); return { result: T('Папка создана: ', 'Folder created: ') + f }; }
+    case 'delete_path': { const f = safe(a.path, true); assertNotSecret(f, true); if (!fs.existsSync(f)) throw new Error(T('Не найдено: ', 'Not found: ') + f); return { result: await deleteToTrash(f) }; }
     case 'bluetooth': return { result: await bluetooth(a.action) };
     case 'find_path': { const r = findPaths(a.query, a.where); return { result: r.length ? JSON.stringify(r) : T('Ничего не найдено', 'Nothing found') }; }
-    case 'list_dir': return withAny(() => ({ result: JSON.stringify(listDir(a.path || '')) }));
-    case 'read_file': return withAny(() => ({ result: readFile(a.path) }));
-    case 'write_file': return withAny(() => { const before = writeFile(a.path, a.content); return { result: 'OK', before }; });
-    case 'replace_in_file': return withAny(() => { const before = replaceInFile(a.path, a.old_str, a.new_str); return { result: 'OK', before }; });
-    case 'search': return withAny(() => ({ result: search(a.query, a.path, !!a.regex) }));
-    case 'apply_patch': return withAny(() => { const before = applyPatch(a.path, a.patch); return { result: 'OK', before }; });
+    case 'list_dir': return { result: JSON.stringify(listDir(a.path || '', true)) };
+    case 'read_file': return { result: readFile(a.path, true) };
+    case 'write_file': { const before = writeFile(a.path, a.content, true); return { result: 'OK', before }; }
+    case 'replace_in_file': { const before = replaceInFile(a.path, a.old_str, a.new_str, true); return { result: 'OK', before }; }
+    case 'search': return { result: search(a.query, a.path, !!a.regex, true) };
+    case 'apply_patch': { const before = applyPatch(a.path, a.patch, true); return { result: 'OK', before }; }
     case 'web_search': return { result: await webSearch(a.query) };
     case 'fetch_url': return { result: await fetchUrl(a.url) };
     case 'run_command': return { result: await run(a.command, a.timeout, a.shell) };
@@ -346,19 +515,26 @@ async function tool(name, a) {
     default: throw new Error(T('Неизвестный инструмент: ', 'Unknown tool: ') + name);
   }
 }
-function fsop({ op, path: p, to }) {
+function fsop(b) {
+  const { op, path: p, to } = b || {};
+  if (!['mkdir', 'create', 'rename', 'delete'].includes(op)) throw new Error(T('Неизвестная операция', 'Unknown operation'));
+  if (typeof p !== 'string' || !p.trim()) throw new Error(T('Не указан путь', 'Path is required'));
   const f = safe(p);
+  if (op === 'rename' && (typeof to !== 'string' || !to.trim())) throw new Error(T('Не указан новый путь', 'New path is required'));
   if (op === 'mkdir') fs.mkdirSync(f, { recursive: true });
   else if (op === 'create') { fs.mkdirSync(path.dirname(f), { recursive: true }); if (fs.existsSync(f)) throw new Error(T('Уже существует', 'Already exists')); fs.writeFileSync(f, ''); }
   else if (op === 'rename') { const t = safe(to); if (fs.existsSync(t)) throw new Error(T('Уже существует', 'Already exists')); fs.mkdirSync(path.dirname(t), { recursive: true }); fs.renameSync(f, t); }
   else if (op === 'delete') { if (f === ROOT) throw new Error(T('Нельзя удалить корень', 'Cannot delete the project root')); fs.rmSync(f, { recursive: true, force: true }); }
-  else throw new Error(T('Неизвестная операция', 'Unknown operation'));
   return 'OK';
 }
 function readRules() {
   for (const n of ['.localcode/rules.md', 'AGENTS.md', '.cursorrules', 'CLAUDE.md']) {
     const f = path.join(ROOT, n);
-    if (fs.existsSync(f)) { try { return fs.readFileSync(f, 'utf8').slice(0, 6000); } catch {} }
+    try {
+      if (!fs.lstatSync(f).isFile()) continue;        // символическую ссылку не читаем
+      if (!realInside(f, ROOT)) continue;
+      return fs.readFileSync(f, 'utf8').slice(0, 6000);
+    } catch {}
   }
   return '';
 }
@@ -468,6 +644,7 @@ async function withKeys(cfg, emit, fn) {
 }
 async function httpErr(r) { return new HttpError(await errText(r), r.status, +r.headers.get('retry-after') || 0); }
 async function testKeys(cfg) {
+  await assertProviderUrl(cfg);
   const keys = keyList(cfg), out = [];
   for (const k of keys) {
     const st = stOf(k), left = Math.max(0, Math.ceil((st.until - Date.now()) / 1000));
@@ -602,14 +779,18 @@ async function handleChat(b, res) {
   res.on('close', () => ac.abort());
   res.writeHead(200, { 'Content-Type': 'application/x-ndjson; charset=utf-8', 'Cache-Control': 'no-cache' });
   const emit = (o) => { if (!res.writableEnded) res.write(JSON.stringify(o) + '\n'); };
-  try { emit({ t: 'done', message: await withKeys(b.cfg, emit, (c) => streamer(c)(c, b.messages, b.tools, emit, ac.signal, b.opts || {})) }); }
-  catch (e) { emit({ t: 'error', v: e.name === 'AbortError' ? T('Остановлено', 'Stopped') : explain(e) }); }
+  try {
+    if (!b || !b.cfg || !Array.isArray(b.messages)) throw new Error(T('Неверный запрос к модели', 'Invalid model request'));
+    await assertProviderUrl(b.cfg);
+    emit({ t: 'done', message: await withKeys(b.cfg, emit, (c) => streamer(c)(c, b.messages, b.tools, emit, ac.signal, b.opts || {})) });
+  } catch (e) { emit({ t: 'error', v: e.name === 'AbortError' ? T('Остановлено', 'Stopped') : explain(e) }); }
   res.end();
 }
 const stripFence = (t) => String(t || '').replace(/^\s*```[^\n]*\n/, '').replace(/\n?```\s*$/, '');
 
 async function complete(b) {
-  const { cfg, prefix, suffix, path: p } = b;
+  const { cfg, prefix, suffix, path: p } = b || {};
+  await assertProviderUrl(cfg);
   if (/:11434/.test(cfg.baseUrl || '')) {            // Ollama: настоящий fill-in-the-middle
     try {
       const r = await fetch(new URL(cfg.baseUrl).origin + '/api/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -625,7 +806,8 @@ async function complete(b) {
 }
 const listModels = (cfg) => withKeys(cfg, () => {}, listModelsOnce);
 async function listModelsOnce(cfg) {
-  const r = await fetch(baseOf(cfg) + '/models', { headers: authHeaders(cfg) });
+  await assertProviderUrl(cfg);
+  const r = await fetch(baseOf(cfg) + '/models', { headers: authHeaders(cfg), signal: AbortSignal.timeout(20000) });
   if (!r.ok) throw await httpErr(r);
   const j = await r.json();
   return (j.data || j.models || []).map(m => m.id || m.name).filter(Boolean);
@@ -706,7 +888,15 @@ async function handlePull(b, res) {
 }
 
 /* ---------- git (ветка и число изменённых файлов для статус-бара) ---------- */
-function git(args) { return new Promise((res) => execFile('git', args, { cwd: ROOT, timeout: 4000, windowsHide: true, maxBuffer: 4 * 1024 * 1024 }, (e, out) => res(e ? null : String(out)))); }
+const NO_HOOKS_DIR = path.join(CFG_DIR, 'no-git-hooks');
+try { secureDir(NO_HOOKS_DIR); } catch {}
+const GIT_SAFE = ['-c', 'core.fsmonitor=', '-c', 'core.pager=cat', '-c', 'core.hooksPath=' + NO_HOOKS_DIR, '-c', 'core.editor=true'];
+function git(args) {
+  return new Promise((res) => execFile('git', [...GIT_SAFE, ...args], {
+    cwd: ROOT, timeout: 4000, windowsHide: true, maxBuffer: 4 * 1024 * 1024,
+    env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_NOSYSTEM: '1', GIT_OPTIONAL_LOCKS: '0' },
+  }, (e, out) => res(e ? null : String(out))));
+}
 async function gitInfo() {
   let b = await git(['symbolic-ref', '--short', '-q', 'HEAD']);
   if (b === null) b = await git(['rev-parse', '--short', 'HEAD']);   // detached HEAD
@@ -727,6 +917,7 @@ const sttBin = () => (process.env.WHISPER_CLI && fs.existsSync(process.env.WHISP
 const sttModelFile = (size) => { const m = STT_MODELS[size] || STT_MODELS.base; for (const n of [m[0], m[1]]) { const f = path.join(STT_DIR, n); try { if (fs.statSync(f).size > 1e6) return f; } catch {} } return null; };
 const sttStatus = () => ({ canInstall: process.platform === 'win32', bin: !!sttBin(), models: Object.fromEntries(Object.entries(STT_MODELS).map(([k, v]) => [k, { ready: !!sttModelFile(k), mb: v[2] }])) });
 async function downloadTo(url, dest, onPct, signal) {
+  await assertPublicUrl(new URL(url));
   const ac = new AbortController(); const onAbort = () => ac.abort(); if (signal) { if (signal.aborted) ac.abort(); else signal.addEventListener('abort', onAbort); }
   let t = setTimeout(() => ac.abort(), 30000), tmp = dest + '.part', out;
   try {
@@ -831,75 +1022,196 @@ function handleTermRun(b, res) {
 }
 
 /* ---------- HTTP ---------- */
-const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml' };
-function body(req) {
-  return new Promise((resolve, reject) => {
-    const chunks = []; let size = 0;
-    req.on('data', c => { size += c.length; if (size > 30e6) { reject(new Error(T('Слишком большой запрос', 'Request too large'))); req.destroy(); } else chunks.push(c); });
-    req.on('end', () => { try { resolve(chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {}); } catch (e) { reject(e); } });
+const MIME = {
+  '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
+  '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.png': 'image/png', '.json': 'application/json; charset=utf-8',
+};
+/* Интерфейс отдаётся только из этого списка файлов — выйти за папку через ../ или %2e%2e невозможно. */
+const STATIC_FILES = new Set(['index.html', 'app.js', 'style.css', 'highlight.js', 'i18n.js']);
+function staticPath(pathname) {
+  let name;
+  try { name = pathname === '/' ? 'index.html' : path.basename(decodeURIComponent(pathname)); } catch { return null; }
+  if (!STATIC_FILES.has(name)) return null;
+  const pub = path.join(__dirname, 'public');
+  const f = path.join(fs.existsSync(pub) ? pub : __dirname, name);
+  return fs.existsSync(f) ? f : null;
+}
+/* Заголовки безопасности — у всех ответов, включая потоковые. */
+const SEC_HEADERS = {
+  'X-Content-Type-Options': 'nosniff',
+  'X-Frame-Options': 'DENY',
+  'Referrer-Policy': 'no-referrer',
+  'Cross-Origin-Opener-Policy': 'same-origin',
+  'Cross-Origin-Resource-Policy': 'same-origin',
+  'X-Permitted-Cross-Domain-Policies': 'none',
+  'Permissions-Policy': 'camera=(), geolocation=(), payment=(), usb=(), microphone=(self)',
+};
+const CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'";
+const MAX_JSON_BODY = 30e6;
+const body = (req) => new Promise((resolve, reject) => {
+  if (!/^application\/json\b/i.test(String(req.headers['content-type'] || '')))
+    return reject(new HttpError(T('Нужен заголовок Content-Type: application/json', 'Content-Type: application/json is required'), 415));
+  const chunks = []; let size = 0;
+  req.on('data', c => { size += c.length; if (size > MAX_JSON_BODY) { reject(new HttpError(T('Слишком большой запрос', 'Request too large'), 413)); req.destroy(); } else chunks.push(c); });
+  req.on('end', () => {
+    try {
+      const o = chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {};
+      resolve(o && typeof o === 'object' && !Array.isArray(o) ? o : {});
+    } catch { reject(new HttpError(T('Некорректный JSON', 'Invalid JSON'), 400)); }
   });
+  req.on('error', reject);
+});
+/* Сравнение токена без утечки по времени. */
+function tokenOk(v) {
+  const t = String(v || '');
+  if (t.length !== TOKEN.length) return false;
+  try { return crypto.timingSafeEqual(Buffer.from(t, 'utf8'), Buffer.from(TOKEN, 'utf8')); } catch { return false; }
 }
 let activeChats = 0;
 const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url, `http://${HOST}:${PORT}`);
-  if (req.headers['x-lang'] === 'en' || req.headers['x-lang'] === 'ru') SLANG = req.headers['x-lang'];
-  const json = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(obj)); };
-  if (![`${HOST}:${PORT}`, `localhost:${PORT}`].includes(req.headers.host)) return json(403, { error: 'bad host' });
-
-  if (url.pathname === '/favicon.ico') { res.writeHead(204); return res.end(); }
-  if (req.method === 'GET' && !url.pathname.startsWith('/api/')) {
-    const name = url.pathname === '/' ? 'index.html' : path.basename(url.pathname);
-    const f = path.join(__dirname, 'public', name);
-    if (!fs.existsSync(f) || !MIME[path.extname(f)]) return json(404, { error: 'not found' });
-    res.writeHead(200, { 'Content-Type': MIME[path.extname(f)] + '; charset=utf-8', 'Cache-Control': 'no-cache' });
-    return res.end(fs.readFileSync(f));
-  }
-  if (url.pathname === '/api/health') return json(200, { ok: true, version: VERSION, node: process.version, uptime: Math.round(process.uptime()) });
-  if (req.headers['x-token'] !== TOKEN) return json(401, { error: T('Неверный токен. Откройте ссылку из консоли.', 'Invalid token. Open the link printed in the console.') });
-
+  for (const [k, v] of Object.entries(SEC_HEADERS)) res.setHeader(k, v);
+  res.setHeader('Cache-Control', 'no-store');
+  const json = (code, obj) => {
+    if (res.headersSent) { try { res.end(); } catch {} return; }
+    res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify(obj));
+  };
   try {
-    const p = url.pathname;
-    if (p === '/api/info') return json(200, { root: ROOT, name: path.basename(ROOT), platform: process.platform, home: os.homedir(), defaults: conf.defaults || {}, recent: conf.recent || [] });
-    if (p === '/api/tree') return json(200, listDir(url.searchParams.get('path') || ''));
-    if (p === '/api/files') return json(200, allFiles());
-    if (p === '/api/rules') return json(200, { rules: readRules() });
-    if (p === '/api/file' && req.method === 'GET') return json(200, { content: readFile(url.searchParams.get('path')) });
-    if (p === '/api/file') { const b = await body(req); return json(200, { before: writeFile(b.path, b.content) }); }
-    if (p === '/api/tool') { const b = await body(req); return json(200, await tool(b.name, b.args || {})); }
-    if (p === '/api/fsop') return json(200, { result: fsop(await body(req)) });
-    if (p === '/api/chat') {
-      if (activeChats >= 3) return json(429, { error: T('Слишком много одновременных запросов к модели. Подождите завершения предыдущих.', 'Too many simultaneous model requests. Wait for the previous ones to finish.') });
-      activeChats++; res.on('close', () => { activeChats = Math.max(0, activeChats - 1); });
-      return await handleChat(await body(req), res);
+    let url; try { url = new URL(req.url, `http://${HOST}:${PORT}`); } catch { return json(400, { error: 'bad request' }); }
+    if (req.headers['x-lang'] === 'en' || req.headers['x-lang'] === 'ru') SLANG = req.headers['x-lang'];
+
+    /* Host проверяется строго: защита от DNS-rebinding (чужой домен не «станет» localhost). */
+    const hostHeader = String(req.headers.host || '').toLowerCase().replace(/\.(?=:|$)/, '');
+    const allowedHosts = new Set([`${HOST}:${PORT}`, `localhost:${PORT}`, HOST, 'localhost']);
+    if (!allowedHosts.has(hostHeader)) return json(403, { error: 'bad host' });
+
+    const p = url.pathname, isApi = p.startsWith('/api/');
+
+    /* CSRF: браузер сам присылает Origin и Sec-Fetch-Site. Чужой сайт не может дёргать API даже с токеном. */
+    if (isApi) {
+      const origin = String(req.headers.origin || '').toLowerCase();
+      const okOrigins = new Set([`http://${HOST}`, `http://localhost`, `http://${HOST}:${PORT}`, `http://localhost:${PORT}`]);
+      if (origin && !okOrigins.has(origin)) return json(403, { error: T('Запросы с других сайтов запрещены', 'Requests from other sites are not allowed') });
+      const site = req.headers['sec-fetch-site'];
+      if (site && site !== 'same-origin' && site !== 'none') return json(403, { error: T('Запросы с других сайтов запрещены', 'Requests from other sites are not allowed') });
     }
-    if (p === '/api/complete') return json(200, { text: await complete(await body(req)) });
-    if (p === '/api/keys/test') return json(200, { keys: await testKeys((await body(req)).cfg) });
-    if (p === '/api/keys/reset') { resetKeys(); return json(200, { ok: true }); }
-    if (p === '/api/models') return json(200, { models: await listModels((await body(req)).cfg) });
-    if (p === '/api/catalog') return json(200, await catalog());
-    if (p === '/api/installed') { const inst = await installedModels(); return json(200, { ollama: inst !== null, installed: inst || [] }); }
-    if (p === '/api/git') return json(200, await gitInfo());
-    if (p === '/api/ping') { lastPing = Date.now(); return json(200, { ok: true }); }
-    if (p === '/api/term/run') return handleTermRun(await body(req), res);
-    if (p === '/api/term/input') { const b = await body(req), c = TERMS.get(+b.id); if (c && c.stdin.writable) c.stdin.write(String(b.data ?? '')); return json(200, { ok: !!c }); }
-    if (p === '/api/term/kill') { const b = await body(req), c = TERMS.get(+b.id); if (c) killTree(c); return json(200, { ok: !!c }); }
-    if (p === '/api/stt/status') return json(200, sttStatus());
-    if (p === '/api/stt/install') return await handleSttInstall(await body(req), res);
-    if (p === '/api/stt/remove') { fs.rmSync(STT_DIR, { recursive: true, force: true }); return json(200, sttStatus()); }
-    if (p === '/api/stt') { const wav = await rawBody(req); return json(200, { text: await transcribe(wav, url.searchParams.get('lang'), url.searchParams.get('size') || 'base') }); }
-    if (p === '/api/pull') return await handlePull(await body(req), res);
-    if (p === '/api/pick-folder') return json(200, { path: await pickFolder() });
-    if (p === '/api/chdir') { const b = await body(req); if (!fs.existsSync(b.path)) throw new Error(T('Папка не найдена', 'Folder not found')); setRoot(b.path); return json(200, { root: ROOT }); }
+
+    if (p === '/favicon.ico') { res.writeHead(204); return res.end(); }
+    if (req.method === 'GET' && !isApi) {
+      const f = staticPath(p);
+      if (!f) return json(404, { error: 'not found' });
+      const ext = path.extname(f), headers = { 'Content-Type': MIME[ext] || 'application/octet-stream', 'Cache-Control': 'no-cache' };
+      if (ext === '.html') headers['Content-Security-Policy'] = CSP;
+      res.writeHead(200, headers);
+      return res.end(fs.readFileSync(f));
+    }
+    if (p === '/api/health') return json(200, { ok: true, version: VERSION });
+
+    const token = String(req.headers['x-token'] || '').replace(/^Bearer\s+/i, '') || String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+    if (!tokenOk(token)) return json(401, { error: T('Неверный токен. Откройте ссылку из консоли.', 'Invalid token. Open the link printed in the console.') });
+    if (!isApi) return json(404, { error: 'not found' });
+
+    /* Метод проверяется явно: GET не должен ничего менять. */
+    const only = (m) => { if (req.method === m) return true; json(405, { error: 'method not allowed' }); return false; };
+    const str = (v, max = 1e6) => typeof v === 'string' && v.length <= max;
+
+    if (p === '/api/info') { if (!only('GET')) return; return json(200, { root: ROOT, name: path.basename(ROOT), platform: process.platform, home: os.homedir(), defaults: conf.defaults || {}, recent: conf.recent || [] }); }
+    if (p === '/api/tree') { if (!only('GET')) return; return json(200, listDir(url.searchParams.get('path') || '')); }
+    if (p === '/api/files') { if (!only('GET')) return; return json(200, allFiles()); }
+    if (p === '/api/rules') { if (!only('GET')) return; return json(200, { rules: readRules() }); }
+    if (p === '/api/file') {
+      if (req.method === 'GET') {
+        const q = url.searchParams.get('path');
+        if (!str(q)) return json(400, { error: T('Не указан путь', 'Path is required') });
+        return json(200, { content: readFile(q) });
+      }
+      if (!only('POST')) return;
+      const b = await body(req);
+      if (!str(b.path) || !b.path) return json(400, { error: T('Не указан путь', 'Path is required') });
+      if (!str(b.content, MAX_JSON_BODY)) return json(400, { error: T('Неверное содержимое', 'Invalid content') });
+      return json(200, { before: writeFile(b.path, b.content) });
+    }
+    if (p === '/api/tool') {
+      if (!only('POST')) return;
+      const b = await body(req);
+      if (!str(b.name)) return json(400, { error: T('Не указан инструмент', 'Tool name is required') });
+      if (b.args != null && (typeof b.args !== 'object' || Array.isArray(b.args))) return json(400, { error: T('Аргументы должны быть объектом', 'Arguments must be an object') });
+      return json(200, await tool(b.name, b.args || {}));
+    }
+    if (p === '/api/fsop') { if (!only('POST')) return; return json(200, { result: fsop(await body(req)) }); }
+    if (p === '/api/chat') {
+      if (!only('POST')) return;
+      if (activeChats >= 3) return json(429, { error: T('Слишком много одновременных запросов к модели. Подождите завершения предыдущих.', 'Too many simultaneous model requests. Wait for the previous ones to finish.') });
+      const b = await body(req);
+      activeChats++; res.on('close', () => { activeChats = Math.max(0, activeChats - 1); });
+      return await handleChat(b, res);
+    }
+    if (p === '/api/complete') { if (!only('POST')) return; return json(200, { text: await complete(await body(req)) }); }
+    if (p === '/api/keys/test') { if (!only('POST')) return; return json(200, { keys: await testKeys((await body(req)).cfg) }); }
+    if (p === '/api/keys/reset') { if (!only('POST')) return; resetKeys(); return json(200, { ok: true }); }
+    if (p === '/api/models') { if (!only('POST')) return; return json(200, { models: await listModels((await body(req)).cfg) }); }
+    if (p === '/api/catalog') { if (!only('GET')) return; return json(200, await catalog()); }
+    if (p === '/api/installed') { if (!only('GET')) return; const inst = await installedModels(); return json(200, { ollama: inst !== null, installed: inst || [] }); }
+    if (p === '/api/git') { if (!only('GET')) return; return json(200, await gitInfo()); }
+    if (p === '/api/ping') { if (!only('GET')) return; lastPing = Date.now(); return json(200, { ok: true }); }
+    if (p === '/api/term/run') {
+      if (!only('POST')) return;
+      const b = await body(req);
+      if (!str(b.command)) return json(400, { error: T('Пустая команда', 'Empty command') });
+      return handleTermRun(b, res);
+    }
+    if (p === '/api/term/input') {
+      if (!only('POST')) return;
+      const b = await body(req), c = TERMS.get(+b.id), d = String(b.data ?? '');
+      if (d.length > 65536) return json(413, { error: T('Слишком длинный ввод', 'Input is too long') });
+      if (c && c.stdin.writable) c.stdin.write(d);
+      return json(200, { ok: !!c });
+    }
+    if (p === '/api/term/kill') { if (!only('POST')) return; const b = await body(req), c = TERMS.get(+b.id); if (c) killTree(c); return json(200, { ok: !!c }); }
+    if (p === '/api/stt/status') { if (!only('GET')) return; return json(200, sttStatus()); }
+    if (p === '/api/stt/install') { if (!only('POST')) return; return await handleSttInstall(await body(req), res); }
+    if (p === '/api/stt/remove') { if (!only('POST')) return; fs.rmSync(STT_DIR, { recursive: true, force: true }); return json(200, sttStatus()); }
+    if (p === '/api/stt') {
+      if (!only('POST')) return;
+      if (!/^audio\//i.test(String(req.headers['content-type'] || ''))) return json(415, { error: T('Ожидается аудио', 'Audio is expected') });
+      const wav = await rawBody(req);
+      const size = url.searchParams.get('size') || 'base';
+      return json(200, { text: await transcribe(wav, url.searchParams.get('lang'), STT_MODELS[size] ? size : 'base') });
+    }
+    if (p === '/api/pull') { if (!only('POST')) return; const b = await body(req); if (!str(b.id)) return json(400, { error: T('Не указана модель', 'Model is required') }); return await handlePull(b, res); }
+    if (p === '/api/pick-folder') { if (!only('POST')) return; return json(200, { path: await pickFolder() }); }
+    if (p === '/api/chdir') {
+      if (!only('POST')) return;
+      const b = await body(req);
+      if (!str(b.path) || !path.isAbsolute(b.path)) return json(400, { error: T('Нужен абсолютный путь к папке', 'An absolute folder path is required') });
+      let st; try { st = fs.statSync(b.path); } catch { throw new Error(T('Папка не найдена', 'Folder not found')); }
+      if (!st.isDirectory()) return json(400, { error: T('Это не папка', 'This is not a folder') });
+      if (isSystemDir(b.path)) return json(403, { error: T('Системная папка не может быть папкой проекта', 'A system folder cannot be the project folder') });
+      setRoot(b.path);
+      return json(200, { root: ROOT });
+    }
     json(404, { error: 'not found' });
-  } catch (e) { log(req.method, url.pathname, e && e.message); if (!res.headersSent) json(500, { error: explain(e) }); else res.end(); }
+  } catch (e) {
+    log(req.method, req.url && req.url.split('?')[0], e && e.message);
+    json(e instanceof HttpError ? e.status : 500, { error: explain(e) });
+  }
 });
 
 if (require.main === module) {
+/* Тайм-ауты против «медленных» клиентов; локальному окну этого достаточно. */
+server.headersTimeout = 20000;
+server.requestTimeout = 120000;
+server.maxHeadersCount = 100;
 server.on('listening', () => {
-  const url = `http://localhost:${PORT}/?token=${TOKEN}`;
+  // Токен передаём во фрагменте ссылки (#): он не попадает в журналы сервера и в Referer.
+  const url = `http://localhost:${PORT}/#token=${TOKEN}`;
+  // Окно открывается само, поэтому в localcode.log токен не пишем: в журнале только безопасный адрес.
+  const shown = argv.includes('--app') ? `http://localhost:${PORT}/` : url;
   console.log(T('\n  LocalCode запущен', '\n  LocalCode is running'));
   console.log(T('  Папка проекта:', '  Project folder:'), ROOT);
-  console.log(T('  Откройте:     ', '  Open:          '), url, '\n');
+  console.log(T('  Откройте:     ', '  Open:          '), shown);
+  if (argv.includes('--app')) console.log(T('  Ссылка с токеном — в открытом окне; для ручного входа запустите LocalCode.bat.', '  The link with the token is in the opened window; run LocalCode.bat to get it manually.'));
+  console.log('');
   if (argv.includes('--app') || argv.includes('--open')) ensureOllama();
   setTimeout(warmHW, 4000).unref();   // определение железа в отдельном процессе, чтобы не тормозить окно
   if (argv.includes('--app')) openApp(url);
@@ -911,4 +1223,4 @@ server.on('error', (e) => {
 });
 server.listen(PORT, HOST);
 }
-module.exports = { HttpError, withKeys, keyState, resetKeys, classifyKeyError, safe, setRoot, replaceInFile, applyPatch, run, search, findPaths, parseDdg, htmlToText, isPrivateHost, fetchUrl, openTarget, VERSION };
+module.exports = { HttpError, withKeys, keyState, resetKeys, classifyKeyError, safe, setRoot, replaceInFile, applyPatch, run, search, findPaths, parseDdg, htmlToText, isPrivateHost, isPrivateIp, assertPublicUrl, assertProviderUrl, isSecretFile, fetchUrl, openTarget, VERSION };

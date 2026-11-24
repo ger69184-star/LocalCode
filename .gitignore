@@ -1,0 +1,11 @@
+# Журнал и локальные настройки никогда не должны попадать в репозиторий
+localcode.log
+.localcode/
+node_modules/
+
+# Секреты
+.env
+.env.local
+.env.*.local
+*.pem
+*.key

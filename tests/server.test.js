@@ -2,6 +2,8 @@
 // Запуск: npm test   (нужен Node 18+; тесты используют встроенный node:test)
 const test = require('node:test'), assert = require('node:assert/strict');
 const fs = require('fs'), os = require('os'), path = require('path');
+// Своя папка настроек: тесты не читают и не меняют настоящий ~/.localcode
+process.env.LOCALCODE_CONFIG_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'lc-cfg-'));
 const S = require('../server.js');
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'lc-test-'));
 S.setRoot(tmp);

@@ -42,7 +42,9 @@ function ollamaBin() {
   return null;
 }
 async function download(url, dest) {
+  if (new URL(url).protocol !== 'https:') throw new Error('Разрешены только https-загрузки');
   const r = await fetch(url); if (!r.ok) throw new Error('HTTP ' + r.status);
+  if (!/^https:/.test(r.url)) throw new Error('Загрузка перенаправлена на небезопасный адрес');
   const total = +r.headers.get('content-length') || 0; let got = 0, last = 0;
   const out = fs.createWriteStream(dest);
   for await (const chunk of r.body) { out.write(chunk); got += chunk.length; if (total && Date.now() - last > 500) { last = Date.now(); process.stdout.write(`\r  ${(got / 2 ** 20).toFixed(0)} / ${(total / 2 ** 20).toFixed(0)} МБ`); } }
@@ -57,7 +59,7 @@ async function installOllama() {
   } else if (MAC) {
     if (spawnSync('brew', ['--version']).status === 0) run('brew', ['install', 'ollama']);
     else say('  Установите Ollama вручную: https://ollama.com/download и запустите установщик ещё раз.');
-  } else run('sh', ['-c', 'curl -fsSL https://ollama.com/install.sh | sh'], { shell: false });
+  } else run('sh', ['-c', "curl -fsSL --proto '=https' --tlsv1.2 https://ollama.com/install.sh | sh"], { shell: false });
 }
 async function alive() { try { return (await fetch('http://127.0.0.1:11434/api/version', { signal: AbortSignal.timeout(2000) })).ok; } catch { return false; } }
 const tuneEnv = (low) => ({ ...process.env, OLLAMA_NUM_PARALLEL: '1', OLLAMA_MAX_LOADED_MODELS: '1', OLLAMA_KEEP_ALIVE: '30m', ...(low ? { OLLAMA_FLASH_ATTENTION: '1', OLLAMA_KV_CACHE_TYPE: 'q8_0' } : {}) });

@@ -8,8 +8,14 @@ const L2 = (ru, en) => (LANG === 'ru' ? ru : en);   // двуязычные ст
 applyI18n();
 
 /* ================= API ================= */
+// Токен приходит во фрагменте ссылки (#token=…): он не уходит на сервер в адресе и не попадает в Referer.
 const sp = new URLSearchParams(location.search);
-if (sp.get('token')) { sessionStorage.token = sp.get('token'); window.history.replaceState(null, '', '/'); }
+const hp = new URLSearchParams(String(location.hash || '').replace(/^#/, ''));
+const urlToken = hp.get('token') || sp.get('token') || '';
+if (urlToken) {
+  if (/^[a-f0-9]{16,64}$/i.test(urlToken)) sessionStorage.token = urlToken;
+  window.history.replaceState(null, '', '/');
+}
 const TOKEN = sessionStorage.token || '';
 const H = () => ({ 'x-token': TOKEN, 'Content-Type': 'application/json', 'x-lang': LANG });
 async function api(path, opts = {}) {
@@ -446,7 +452,8 @@ const TOOLS = [
   fn('open', 'Open a web page (http/https URL) in the default browser, or a file/folder (music, video, document) in its default app. Relative paths are inside the project.', { target: { type: 'string' } }, ['target']),
 ];
 function fn(name, description, props, required) { return { type: 'function', function: { name, description, parameters: { type: 'object', properties: props, required } } }; }
-const NEEDS_OK = new Set(['write_file', 'replace_in_file', 'apply_patch', 'run_command', 'open', 'delete_path']);
+// Поиск в интернете и чтение ссылок передают данные наружу — тоже только с подтверждением.
+const NEEDS_OK = new Set(['write_file', 'replace_in_file', 'apply_patch', 'run_command', 'open', 'delete_path', 'web_search', 'fetch_url']);
 const needsOk = (n, a) => NEEDS_OK.has(n) || (n === 'bluetooth' && /^(on|off)$/i.test((a && a.action) || ''));
 let chatHist = [], busy = false, stopFlag = false, chatCtl = null, pendingAsk = null;
 
@@ -501,7 +508,7 @@ $('#log').addEventListener('click', async (e) => {
 function askApproval(name, args) {
   if ($('#auto').checked || !needsOk(name, args)) return Promise.resolve(true);
   return new Promise((resolve) => {
-    const detail = name === 'apply_patch' ? esc(args.path + '\n\n' + args.patch) : name === 'delete_path' ? esc(args.path + '\n' + L2('(будет перенесено в корзину)', '(goes to the Recycle Bin)')) : name === 'bluetooth' ? esc('Bluetooth: ' + args.action) : name === 'run_command' ? esc(args.command) : name === 'open' ? esc(args.target) : name === 'write_file' ? esc(`${args.path}\n\n${(args.content || '').slice(0, 4000)}`) : `${esc(args.path)}\n\n${diffHtml(args.old_str || '', args.new_str || '')}`;
+    const detail = name === 'apply_patch' ? esc(args.path + '\n\n' + args.patch) : name === 'delete_path' ? esc(args.path + '\n' + L2('(будет перенесено в корзину)', '(goes to the Recycle Bin)')) : name === 'bluetooth' ? esc('Bluetooth: ' + args.action) : name === 'run_command' ? esc(args.command) : name === 'open' ? esc(args.target) : name === 'fetch_url' ? esc(args.url) : name === 'web_search' ? esc(args.query) : name === 'write_file' ? esc(`${args.path}\n\n${(args.content || '').slice(0, 4000)}`) : `${esc(args.path)}\n\n${diffHtml(args.old_str || '', args.new_str || '')}`;
     const d = addMsg('ask', `<b>${esc(tr('ask_allow', name))}</b><pre>${detail}</pre><div class="row"><button class="primary" data-a="1">${esc(tr('allow'))}</button><button data-a="0">${esc(tr('deny'))}</button></div>`);
     pendingAsk = (v) => { d.remove(); pendingAsk = null; resolve(v); };
     d.querySelectorAll('button[data-a]').forEach(b => b.onclick = () => pendingAsk(b.dataset.a === '1'));
@@ -1025,6 +1032,11 @@ $('#fPreset').onchange = () => {
 };
 const keysFromForm = () => { const ks = [...new Set($('#fKeys').value.split(/[\s,;]+/).map(x => x.trim()).filter(Boolean))]; return { apiKeys: ks, apiKey: ks[0] || '' }; };
 $('#fKeysShow').onchange = () => $('#fKeys').classList.toggle('show', $('#fKeysShow').checked);
+// «Без подтверждений» снимает защиту от опасных действий — спрашиваем один раз при включении.
+$('#auto').onchange = () => {
+  if ($('#auto').checked && !confirm(L2('Включить режим без подтверждений?\nВсе действия агента (команды, правка и удаление файлов, установка программ) будут выполняться сразу, без кнопки «Разрешить». Включайте, только если понимаете риск.',
+    'Turn off confirmations?\nEvery agent action (commands, editing and deleting files, installing programs) will run immediately without an Allow button. Enable only if you understand the risk.'))) $('#auto').checked = false;
+};
 $('#fKeysTest').onclick = async () => {
   const out = $('#fKeysRes'), { apiKeys } = keysFromForm();
   if (!apiKeys.length) { out.textContent = tr('keys_none'); return; }
