@@ -7,6 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
+const zlib = require('zlib');
 const net = require('net');
 const dns = require('dns').promises;
 const { exec, execFile, spawn } = require('child_process');
@@ -31,7 +32,11 @@ process.on('unhandledRejection', (e) => log('unhandledRejection:', e && e.stack 
 const IGNORE = new Set(['node_modules', '.git', '__pycache__', '.venv', 'venv', 'dist', 'build', '.next', '.DS_Store', '.idea', '.vscode']);
 
 /* ---------- конфиг пользователя (~/.localcode/config.json) ---------- */
-const CFG_DIR = process.env.LOCALCODE_CONFIG_DIR ? path.resolve(process.env.LOCALCODE_CONFIG_DIR) : path.join(os.homedir(), '.localcode');
+/* Портативный режим: настройки рядом с программой (удобно на флешке).
+   Включается флагом --portable, переменной LOCALCODE_PORTABLE=1 или файлом portable.txt рядом с server.js. */
+const PORTABLE = argv.includes('--portable') || process.env.LOCALCODE_PORTABLE === '1' || fs.existsSync(path.join(__dirname, 'portable.txt'));
+const CFG_DIR = process.env.LOCALCODE_CONFIG_DIR ? path.resolve(process.env.LOCALCODE_CONFIG_DIR)
+  : PORTABLE ? path.join(__dirname, 'data') : path.join(os.homedir(), '.localcode');
 const CFG_FILE = path.join(CFG_DIR, 'config.json');
 let conf = {};
 /* Папка настроек доступна только владельцу: там лежат история проектов, профиль браузера и модели речи. */
@@ -174,6 +179,52 @@ function safe(p, allowHome = false) {
 }
 const rel = (f) => { const r = path.relative(ROOT, f); return (r.startsWith('..') || path.isAbsolute(r)) ? f : r.split(path.sep).join('/'); };
 
+/* ---------- история правок: файл можно вернуть к состоянию до изменения ---------- */
+const HIST_DIR = path.join(CFG_DIR, 'history');
+const HIST_MAX = 300, HIST_MAX_BYTES = 512 * 1024;
+function histSnapshot(full, before) {
+  try {
+    if (before === undefined) return;
+    if (typeof before === 'string' && Buffer.byteLength(before) > HIST_MAX_BYTES) return;
+    const rp = rel(full);
+    if (!rp || path.isAbsolute(rp) || rp.startsWith('..')) return;
+    secureDir(HIST_DIR);
+    const id = Date.now().toString(36) + '-' + crypto.randomBytes(4).toString('hex');
+    const file = path.join(HIST_DIR, id + '.json');
+    fs.writeFileSync(file, JSON.stringify({ id, ts: Date.now(), path: rp, before }), { mode: 0o600 });
+    secureFile(file);
+    const all = fs.readdirSync(HIST_DIR).filter(f => f.endsWith('.json')).sort();
+    for (const f of all.slice(0, Math.max(0, all.length - HIST_MAX))) { try { fs.unlinkSync(path.join(HIST_DIR, f)); } catch {} }
+  } catch {}
+}
+function histList(filterPath, limit = 50) {
+  let names = [];
+  try { names = fs.readdirSync(HIST_DIR).filter(f => f.endsWith('.json')).sort().reverse(); } catch { return []; }
+  const out = [];
+  for (const n of names) {
+    if (out.length >= Math.min(200, Math.max(1, Number(limit) || 50))) break;
+    try {
+      const j = JSON.parse(fs.readFileSync(path.join(HIST_DIR, n), 'utf8'));
+      if (!j || !j.id) continue;
+      if (filterPath && j.path !== filterPath) continue;
+      out.push({ id: j.id, path: j.path, ts: j.ts, created: j.before === null, size: typeof j.before === 'string' ? j.before.length : 0 });
+    } catch {}
+  }
+  return out;
+}
+function histRestore(id) {
+  if (!/^[a-z0-9-]{5,40}$/i.test(String(id || ''))) throw new Error(T('Неверный идентификатор записи', 'Invalid history entry id'));
+  let rec; try { rec = JSON.parse(fs.readFileSync(path.join(HIST_DIR, id + '.json'), 'utf8')); } catch { throw new Error(T('Запись не найдена', 'History entry not found')); }
+  let full; try { full = safe(rec.path); } catch { throw new Error(T('Эта запись относится к другой папке проекта', 'This entry belongs to another project folder')); }
+  const current = fs.existsSync(full) ? fs.readFileSync(full, 'utf8') : null;
+  histSnapshot(full, current);                    // чтобы и сам возврат можно было отменить
+  if (rec.before === null) { fs.rmSync(full, { force: true }); invalidateFiles(); return { path: rec.path, deleted: true }; }
+  fs.mkdirSync(path.dirname(full), { recursive: true });
+  fs.writeFileSync(full, rec.before, 'utf8');
+  invalidateFiles();
+  return { path: rec.path, restored: true };
+}
+
 function listDir(p, allowHome = false) {
   const dir = safe(p, allowHome);
   return fs.readdirSync(dir, { withFileTypes: true })
@@ -198,34 +249,61 @@ function allFiles(limit = 6000) {
   })(ROOT, 0);
   return out;
 }
+/* Список файлов нужен интерфейсу после каждой правки; дерево на 6000 файлов незачем обходить каждый раз. */
+let filesCache = { root: null, at: 0, list: null };
+function cachedAllFiles() {
+  const now = Date.now();
+  if (filesCache.list && filesCache.root === ROOT && now - filesCache.at < 2000) return filesCache.list;
+  filesCache = { root: ROOT, at: now, list: allFiles() };
+  return filesCache.list;
+}
+const invalidateFiles = () => { filesCache.at = 0; };
 function readFile(p, allowHome = false) {
   const f = safe(p, allowHome);
   assertNotSecret(f, allowHome);
-  if (fs.statSync(f).size > 2 * 1024 * 1024) throw new Error(T('Файл больше 2 МБ', 'File is larger than 2 MB'));
-  return fs.readFileSync(f, 'utf8');
+  const st = fs.statSync(f);
+  if (!st.isFile()) throw new Error(T('Это не файл', 'Not a file'));
+  if (st.size > 2 * 1024 * 1024) throw new Error(T('Файл больше 2 МБ', 'File is larger than 2 MB'));
+  const buf = fs.readFileSync(f);
+  if (buf.includes(0)) throw new Error(T('Это двоичный файл — откройте его в программе по умолчанию', 'This is a binary file — open it in the default app'));
+  return buf.toString('utf8');
 }
 function writeFile(p, content, allowHome = false) {
   const f = safe(p, allowHome);
   assertNotSecret(f, allowHome);
-  const before = fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : null;
+  if (Buffer.byteLength(String(content ?? ''), 'utf8') > 5 * 1024 * 1024) throw new Error(T('Файл больше 5 МБ — столько не сохраняем', 'The file is larger than 5 MB — too big to save'));
+  let before = null, snap = null;
+  try {
+    if (fs.existsSync(f)) {
+      const stt = fs.statSync(f);
+      if (stt.size <= 2 * 1024 * 1024) { before = fs.readFileSync(f, 'utf8'); snap = before; }
+      else snap = undefined;                        // слишком большой файл в историю не кладём: откат не должен его удалить
+    }
+  } catch {}
+  histSnapshot(f, snap);
   fs.mkdirSync(path.dirname(f), { recursive: true });
   fs.writeFileSync(f, content, 'utf8');
+  invalidateFiles();
   return { before, warnings: warnList(content) };
 }
 function replaceInFile(p, oldStr, newStr, allowHome = false) {
   if (typeof oldStr !== 'string' || oldStr === '') throw new Error(T('old_str пустой: укажите фрагмент, который нужно заменить', 'old_str is empty: give the fragment to replace'));
   const f = safe(p, allowHome);
   assertNotSecret(f, allowHome);
+  if (fs.statSync(f).size > 5 * 1024 * 1024) throw new Error(T('Файл больше 5 МБ — правка по частям не поддерживается', 'The file is larger than 5 MB — piecewise editing is not supported'));
   const text = fs.readFileSync(f, 'utf8');
   const count = text.split(oldStr).length - 1;
   if (count === 0) throw new Error(T('old_str не найден в файле', 'old_str not found in the file'));
   if (count > 1) throw new Error(T(`old_str встречается ${count} раз — добавьте контекст, чтобы он был уникальным`, `old_str occurs ${count} times — add more context to make it unique`));
+  histSnapshot(f, text);                          // снимок только когда замена точно состоится
   fs.writeFileSync(f, text.replace(oldStr, () => newStr), 'utf8');
+  invalidateFiles();
   return text;
 }
 // Применение diff-патча (unified diff): удобно, когда нужно изменить несколько мест файла за раз
 function applyPatch(p, patch, allowHome = false) {
   const f = safe(p, allowHome); assertNotSecret(f, allowHome);
+  if (fs.statSync(f).size > 5 * 1024 * 1024) throw new Error(T('Файл больше 5 МБ — патч не поддерживается', 'The file is larger than 5 MB — patches are not supported'));
   const text = fs.readFileSync(f, 'utf8'), eol = text.includes('\r\n') ? '\r\n' : '\n';
   const src = String(patch || '').replace(/\r\n/g, '\n').replace(/\n+$/, '').split('\n'), hunks = []; let cur = null;
   for (const l of src) {
@@ -247,7 +325,9 @@ function applyPatch(p, patch, allowHome = false) {
     if (at < 0) throw new Error(T(`Блок ${n + 1} патча не найден в файле: контекст не совпадает`, `Hunk ${n + 1} was not found in the file: context does not match`));
     lines.splice(at, h.old.length, ...h.neu); from = at + h.neu.length;
   });
+  histSnapshot(f, text);                          // снимок только когда все блоки патча совпали
   fs.writeFileSync(f, lines.join(eol), 'utf8');
+  invalidateFiles();
   return text;
 }
 function lineMatcher(query, regex) {
@@ -287,7 +367,9 @@ function search(query, p, regex, allowHome = false) {
       if (e.isDirectory()) { walk(full, depth + 1); continue; }
       try {
         if (fs.statSync(full).size > 1024 * 1024) continue;
-        fs.readFileSync(full, 'utf8').split('\n').forEach((line, i) => { if (out.length < 200 && test(line)) out.push(`${r}:${i + 1}: ${line.trim().slice(0, 200)}`); });
+        const text = fs.readFileSync(full, 'utf8');
+        if (text.includes('\0')) continue;                      // двоичные файлы не ищем
+        text.split('\n').forEach((line, i) => { if (out.length < 200 && test(line)) out.push(`${r}:${i + 1}: ${line.trim().slice(0, 200)}`); });
       } catch {}
     }
   })(safe(p || '', allowHome), 0);
@@ -545,8 +627,217 @@ function fsop(b) {
   else if (op === 'create') { fs.mkdirSync(path.dirname(f), { recursive: true }); if (fs.existsSync(f)) throw new Error(T('Уже существует', 'Already exists')); fs.writeFileSync(f, ''); }
   else if (op === 'rename') { const t = safe(to); if (fs.existsSync(t)) throw new Error(T('Уже существует', 'Already exists')); fs.mkdirSync(path.dirname(t), { recursive: true }); fs.renameSync(f, t); }
   else if (op === 'delete') { if (f === ROOT) throw new Error(T('Нельзя удалить корень', 'Cannot delete the project root')); fs.rmSync(f, { recursive: true, force: true }); }
+  invalidateFiles();
   return 'OK';
 }
+/* ---------- замена по всему проекту ---------- */
+function replaceAllInProject(query, replacement, opts = {}) {
+  const q = String(query ?? ''), rep = String(replacement ?? '');
+  if (!q.trim()) throw new Error(T('Пустой запрос', 'Empty query'));
+  if (q.length > 500) throw new Error(T('Слишком длинный запрос (максимум 500 символов)', 'Query is too long (500 characters max)'));
+  if (rep.length > 20000) throw new Error(T('Слишком длинная замена (максимум 20 000 символов)', 'Replacement is too long (20 000 characters max)'));
+  const useRe = !!opts.regex, dry = opts.dry !== false;
+  let re = null;
+  if (useRe) {
+    try { re = new RegExp(q, 'g'); } catch (e) { throw new Error(T('Неверное регулярное выражение: ', 'Invalid regular expression: ') + e.message); }
+    if (new RegExp(q).test('')) throw new Error(T('Выражение совпадает с пустой строкой — уточните его', 'The expression matches an empty string — make it more specific'));
+  }
+  const MAX_MATCHES = 100000, MAX_RESULT = 5 * 1024 * 1024;
+  const countMatches = (text) => {
+    let n = 0;
+    if (re) { re.lastIndex = 0; let m; while ((m = re.exec(text)) && n < MAX_MATCHES) { n++; if (!m[0].length) re.lastIndex++; } re.lastIndex = 0; }
+    else { let i = 0; while (n < MAX_MATCHES) { const at = text.indexOf(q, i); if (at < 0) break; n++; i = at + q.length; } }
+    return n;
+  };
+  const files = []; let total = 0, scanned = 0, partial = false, changed = 0;
+  // Предпросмотр не должен читать весь проект: ограничиваем объём, для настоящей замены лимит выше.
+  const budget = dry ? 8 * 1024 * 1024 : 300 * 1024 * 1024;
+  const base = safe(opts.path || '');
+  try {
+  (function walk(dir, depth) {
+    if (depth > MAX_WALK_DEPTH || files.length >= 300) return;
+    let list; try { list = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of list) {
+      if (files.length >= 300 || scanned > budget) { partial = partial || scanned > budget; return; }
+      if (IGNORE.has(e.name) || e.isSymbolicLink()) continue;
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) { walk(full, depth + 1); continue; }
+      let text; try { const st = fs.statSync(full); if (!st.isFile() || st.size > 1024 * 1024) continue; scanned += st.size; text = fs.readFileSync(full, 'utf8'); } catch { continue; }
+      if (text.includes('\0') || isSecretFile(full)) continue;
+      let count = 0;
+      try { count = countMatches(text); } catch { continue; }
+      if (!count) continue;
+      files.push({ path: rel(full), count }); total += count;
+      if (!dry) {
+        let out;
+        try { out = useRe ? text.replace(re, () => rep) : text.split(q).join(rep); } catch { continue; }
+        if (Buffer.byteLength(out) > MAX_RESULT) throw new Error(T('Результат замены слишком большой (больше 5 МБ) — уточните запрос', 'The replacement result is too large (over 5 MB) — narrow the query'));
+        histSnapshot(full, text);
+        fs.writeFileSync(full, out, 'utf8');
+        changed++; invalidateFiles();
+      }
+    }
+  })(base, 0);
+  } catch (e) {
+    if (changed) e.message += T(` (до ошибки изменено файлов: ${changed})`, ` (files changed before the error: ${changed})`);
+    throw e;
+  }
+  return { dry, total, partial, filesCount: files.length, files };
+}
+
+/* ---------- ZIP без зависимостей: экспорт и импорт проекта ---------- */
+const CRC_TABLE = (() => { const t = new Int32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1); t[n] = c; } return t; })();
+function crc32(buf) { let c = ~0; for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8); return (~c) >>> 0; }
+function dosStamp(d) {
+  const dt = d instanceof Date ? d : new Date();
+  return { time: (dt.getHours() << 11) | (dt.getMinutes() << 5) | (dt.getSeconds() >> 1), date: ((dt.getFullYear() - 1980) << 9) | ((dt.getMonth() + 1) << 5) | dt.getDate() };
+}
+function zipStore(entries) {
+  const parts = [], central = [];
+  let offset = 0;
+  for (const e of entries) {
+    const name = Buffer.from(String(e.name), 'utf8');
+    const data = Buffer.isBuffer(e.data) ? e.data : Buffer.from(String(e.data ?? ''), 'utf8');
+    const crc = crc32(data), { time, date } = dosStamp(e.mtime);
+    const lh = Buffer.alloc(30);
+    lh.writeUInt32LE(0x04034b50, 0); lh.writeUInt16LE(20, 4); lh.writeUInt16LE(0x800, 6); lh.writeUInt16LE(0, 8);
+    lh.writeUInt16LE(time, 10); lh.writeUInt16LE(date, 12); lh.writeUInt32LE(crc, 14);
+    lh.writeUInt32LE(data.length, 18); lh.writeUInt32LE(data.length, 22); lh.writeUInt16LE(name.length, 26); lh.writeUInt16LE(0, 28);
+    parts.push(lh, name, data);
+    const ch = Buffer.alloc(46);
+    ch.writeUInt32LE(0x02014b50, 0); ch.writeUInt16LE(20, 4); ch.writeUInt16LE(20, 6); ch.writeUInt16LE(0x800, 8); ch.writeUInt16LE(0, 10);
+    ch.writeUInt16LE(time, 12); ch.writeUInt16LE(date, 14); ch.writeUInt32LE(crc, 16);
+    ch.writeUInt32LE(data.length, 20); ch.writeUInt32LE(data.length, 24); ch.writeUInt16LE(name.length, 28);
+    ch.writeUInt32LE(offset, 42);
+    central.push(ch, name);
+    offset += 30 + name.length + data.length;
+  }
+  const cd = Buffer.concat(central);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0); eocd.writeUInt16LE(entries.length, 8); eocd.writeUInt16LE(entries.length, 10);
+  eocd.writeUInt32LE(cd.length, 12); eocd.writeUInt32LE(offset, 16);
+  return Buffer.concat([...parts, cd, eocd]);
+}
+function zipSafeName(name) {
+  const n = String(name || '').replace(/\\/g, '/');
+  if (!n || n.startsWith('/') || n.includes('\0') || /^[a-z]:/i.test(n) || n.length > 400) return null;
+  if (n.split('/').some(seg => seg === '..' || seg === '' || seg === '.')) return null;
+  return n;
+}
+function readZip(buf) {
+  if (!Buffer.isBuffer(buf) || buf.length < 22) throw new Error(T('Это не ZIP-архив', 'Not a ZIP archive'));
+  let end = -1;
+  for (let i = buf.length - 22; i >= Math.max(0, buf.length - 65557); i--) if (buf.readUInt32LE(i) === 0x06054b50) { end = i; break; }
+  if (end < 0) throw new Error(T('Это не ZIP-архив', 'Not a ZIP archive'));
+  const count = buf.readUInt16LE(end + 10), cdSize = buf.readUInt32LE(end + 12), cdOff = buf.readUInt32LE(end + 16);
+  if (count > 5000) throw new Error(T('Слишком много файлов в архиве', 'Too many files in the archive'));
+  if (cdOff + cdSize > buf.length || cdOff < 0) throw new Error(T('Архив повреждён', 'The archive is damaged'));
+  const out = []; let p = cdOff, total = 0, declared = 0;
+  const MAX_FILE = 25 * 1024 * 1024, MAX_TOTAL = 60 * 1024 * 1024;   // защита от «zip-бомбы»: маленький архив — гигабайты на диске
+  for (let n = 0; n < count; n++) {
+    if (p + 46 > buf.length || buf.readUInt32LE(p) !== 0x02014b50) throw new Error(T('Архив повреждён', 'The archive is damaged'));
+    const method = buf.readUInt16LE(p + 10), csize = buf.readUInt32LE(p + 20), usize = buf.readUInt32LE(p + 24);
+    declared += usize;
+    if (usize > MAX_FILE || declared > MAX_TOTAL) throw new Error(T('Архив слишком большой после распаковки', 'The archive is too large once unpacked'));
+    const nl = buf.readUInt16LE(p + 28), el = buf.readUInt16LE(p + 30), cl = buf.readUInt16LE(p + 32), lo = buf.readUInt32LE(p + 42);
+    const name = buf.slice(p + 46, p + 46 + nl).toString('utf8');
+    if (lo + 30 > buf.length) throw new Error(T('Архив повреждён', 'The archive is damaged'));
+    const start = lo + 30 + buf.readUInt16LE(lo + 26) + buf.readUInt16LE(lo + 28);
+    const raw = buf.slice(start, start + csize);
+    let data;
+    if (method === 0) data = raw;
+    else if (method === 8) { try { data = zlib.inflateRawSync(raw); } catch { throw new Error(T('Не удалось распаковать файл: ', 'Cannot unpack file: ') + name); } }
+    else throw new Error(T('Неподдерживаемый способ сжатия в архиве', 'Unsupported compression method in the archive'));
+    total += data.length;
+    if (total > MAX_TOTAL) throw new Error(T('Архив слишком большой', 'The archive is too large'));
+    out.push({ name, data });
+    p += 46 + nl + el + cl;
+  }
+  return out;
+}
+function extractZipInto(buf, dir) {
+  const files = readZip(buf);
+  let n = 0;
+  for (const f of files) {
+    const name = zipSafeName(f.name);
+    if (!name) continue;
+    const target = path.resolve(dir, name);
+    if (target !== dir && !inside(target, dir)) continue;
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, f.data);
+    n++;
+  }
+  return n;
+}
+function projectZipBytes() {
+  const entries = []; let total = 0, stop = false;
+  (function walk(dir, depth) {
+    if (stop || depth > MAX_WALK_DEPTH) return;
+    let list; try { list = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of list) {
+      if (stop) return;
+      if (IGNORE.has(e.name) || e.isSymbolicLink()) continue;
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) { walk(full, depth + 1); continue; }
+      try {
+        const st = fs.statSync(full);
+        if (!st.isFile() || st.size > 8 * 1024 * 1024 || isSecretFile(full)) continue;
+        total += st.size;
+        if (total > 25 * 1024 * 1024) { stop = true; return; }   // столько же, сколько принимает импорт
+        entries.push({ name: rel(full), data: fs.readFileSync(full), mtime: st.mtime });
+      } catch {}
+    }
+  })(ROOT, 0);
+  if (stop) throw new Error(T('Проект больше 25 МБ — архив целиком не поместится. Скопируйте папку в проводнике.', 'The project is larger than 25 MB, too big for one archive. Copy the folder in your file manager instead.'));
+  return zipStore(entries);
+}
+function importZip(data) {
+  const files = readZip(data);
+  let saved = 0, skipped = 0;
+  for (const f of files) {
+    const name = zipSafeName(f.name);
+    if (!name) { skipped++; continue; }
+    let target; try { target = safe(name); } catch { skipped++; continue; }
+    if (isSecretFile(target)) { skipped++; continue; }
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    const isText = !f.data.includes(0) && f.data.length <= HIST_MAX_BYTES;
+    histSnapshot(target, isText ? f.data.toString('utf8') : undefined);
+    fs.writeFileSync(target, f.data);
+    saved++;
+  }
+  if (saved) invalidateFiles();
+  return { saved, skipped, total: files.length };
+}
+
+/* ---------- диагностика окружения и проверка обновлений ---------- */
+async function envInfo() {
+  const out = { version: VERSION, node: process.version, platform: process.platform, arch: process.arch, portable: PORTABLE, port: PORT, root: ROOT, cfgDir: CFG_DIR, uptime: Math.round(process.uptime()) };
+  try { out.memory = { free: os.freemem(), total: os.totalmem() }; } catch {}
+  try { const s = fs.statfsSync(ROOT); out.disk = { free: Number(s.bavail) * Number(s.bsize), total: Number(s.blocks) * Number(s.bsize) }; } catch {}
+  out.git = await new Promise(res => execFile('git', ['--version'], { timeout: 2500, windowsHide: true }, (e, so) => res(e ? '' : String(so).trim())));
+  try { const r = await fetch('http://127.0.0.1:11434/api/tags', { signal: AbortSignal.timeout(1500) }); out.ollama = r.ok; } catch { out.ollama = false; }
+  return out;
+}
+function cmpVer(a, b) {
+  const pa = String(a || '0').replace(/^v/i, '').split(/[.-]/).map(x => parseInt(x, 10) || 0);
+  const pb = String(b || '0').replace(/^v/i, '').split(/[.-]/).map(x => parseInt(x, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) { const d = (pa[i] || 0) - (pb[i] || 0); if (d) return d > 0 ? 1 : -1; }
+  return 0;
+}
+async function updateCheck() {
+  const repo = 'ger69184-star/LocalCode', page = 'https://github.com/' + repo;
+  const r = await fetch('https://api.github.com/repos/' + repo + '/releases/latest', {
+    headers: { 'User-Agent': 'LocalCode/' + VERSION, Accept: 'application/vnd.github+json' },
+    signal: AbortSignal.timeout(8000),
+  });
+  // 404 — либо репозиторий закрыт, либо релизов ещё нет: это не ошибка программы, просто сравнивать не с чем.
+  if (r.status === 404) return { current: VERSION, latest: '', newer: false, url: page, notes: '', reason: 'no-releases' };
+  if (!r.ok) throw new Error('GitHub: HTTP ' + r.status + (r.status === 403 ? T(' (слишком много запросов — попробуйте позже)', ' (rate limited — try again later)') : ''));
+  const j = await r.json();
+  const latest = String(j.tag_name || j.name || '').replace(/^v/i, '');
+  return { current: VERSION, latest, newer: !!latest && cmpVer(latest, VERSION) > 0, url: String(j.html_url || page), notes: String(j.body || '').slice(0, 1500) };
+}
+
 function readRules() {
   for (const n of ['.localcode/rules.md', 'AGENTS.md', '.cursorrules', 'CLAUDE.md']) {
     const f = path.join(ROOT, n);
@@ -641,7 +932,6 @@ function classifyKeyError(e) {
   if (s >= 400 && s < 500 && /quota|rate.?limit|insufficient|exceeded|resource.?exhausted/i.test(msg)) return { ms: 60000, reason: 'limit' };
   return null;   // это не вина ключа (сеть, 5xx, неверная модель) — не переключаем
 }
-const REASON_RU = { limit: 'лимит запросов', balance: 'нет средств на счёте', invalid: 'ключ не принят' }, REASON_EN = { limit: 'rate limit', balance: 'no credit', invalid: 'key rejected' };
 async function withKeys(cfg, emit, fn) {
   const keys = keyList(cfg);
   if (keys.length <= 1 || isOllama(cfg)) return fn(keys.length ? { ...cfg, apiKey: keys[0] } : cfg);
@@ -686,7 +976,7 @@ function statusHint(c) {
   return '';
 }
 async function errText(r) {
-  const t = await r.text();
+  const t = (await readCapped(r, 64 * 1024)).toString('utf8');
   try { const j = JSON.parse(t); return `HTTP ${r.status}: ` + (j.error?.message || j.error || j.message || t).toString().slice(0, 500) + statusHint(r.status); } catch { return `HTTP ${r.status}: ${t.slice(0, 500)}` + statusHint(r.status); }
 }
 function explain(e) {
@@ -694,6 +984,9 @@ function explain(e) {
   if (code === 'ECONNREFUSED') return T('Не удаётся подключиться к серверу модели. Для Ollama: он запущен? (команда «ollama serve»)', 'Cannot connect to the model server. For Ollama: is it running? (command: ollama serve)');
   if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') return T('Адрес не найден — проверьте Base URL и подключение к интернету.', 'Address not found — check the Base URL and your internet connection.');
   if (code === 'ETIMEDOUT' || code === 'UND_ERR_CONNECT_TIMEOUT') return T('Таймаут подключения — сервис недоступен из вашей сети.', 'Connection timed out — the service is unreachable from your network.');
+  if (/CERT|SELF_SIGNED|UNABLE_TO_VERIFY|ERR_TLS/i.test(String(code || '') + ' ' + String(e.message || '')))
+    return T('Не удалось проверить сертификат защищённого соединения. Частая причина — VPN, антивирус или прокси; попробуйте отключить проверку HTTPS в антивирусе или другую сеть.', 'The TLS certificate could not be verified. A common cause is a VPN, antivirus or proxy; try disabling HTTPS scanning in the antivirus or use another network.');
+  if (code === 'ECONNRESET' || code === 'UND_ERR_SOCKET') return T('Соединение оборвалось — проверьте интернет и повторите.', 'The connection was reset — check the internet and try again.');
   return e.message || String(e);
 }
 async function* sseData(resp) {
@@ -814,6 +1107,7 @@ async function complete(b) {
   if (/:11434/.test(cfg.baseUrl || '')) {            // Ollama: настоящий fill-in-the-middle
     try {
       const r = await fetch(new URL(cfg.baseUrl).origin + '/api/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(20000),
         body: JSON.stringify({ model: cfg.model, prompt: prefix, suffix, stream: false, keep_alive: '30m', options: { num_predict: 80, temperature: 0.1, stop: ['\n\n\n'] } }) });
       if (r.ok) { const j = await r.json(); return stripFence(j.response); }
     } catch {}
@@ -837,10 +1131,20 @@ async function listModelsOnce(cfg) {
 let MODELS = [];
 try { MODELS = JSON.parse(fs.readFileSync(path.join(__dirname, 'models.json'), 'utf8')).models || []; } catch {}
 const OLLAMA = process.env.OLLAMA_HOST_URL || 'http://127.0.0.1:11434';
-let HW = null;
-function warmHW() {   // считаем характеристики ПК вне основного процесса: nvidia-smi и PowerShell могут думать по нескольку секунд
-  execFile(process.execPath, ['-e', "process.stdout.write(JSON.stringify(require('./hw').detect()))"], { cwd: __dirname, timeout: 25000, windowsHide: true, encoding: 'utf8' }, (e, out) => { if (!e) { try { HW = HW || JSON.parse(out); } catch {} } });
+let HW = null, hwPromise = null;
+const hwFallback = () => ({ platform: process.platform, arch: process.arch, cpu: ((os.cpus() || [])[0] || {}).model || '?', threads: (os.cpus() || []).length || 1,
+  ramGB: +(os.totalmem() / 2 ** 30).toFixed(1), gpus: [], vramGB: 0, appleSilicon: process.platform === 'darwin' && process.arch === 'arm64', avx: null });
+/* Характеристики ПК считаются в отдельном процессе: nvidia-smi и PowerShell могут думать секундами. */
+function hwDetect() {
+  if (HW) return Promise.resolve(HW);
+  if (hwPromise) return hwPromise;
+  hwPromise = new Promise((resolve) => {
+    execFile(process.execPath, ['-e', "process.stdout.write(JSON.stringify(require('./hw').detect()))"], { cwd: __dirname, timeout: 15000, windowsHide: true, encoding: 'utf8' },
+      (e, out) => { if (!e) { try { HW = HW || JSON.parse(out); } catch {} } hwPromise = null; resolve(HW || hwFallback()); });
+  });
+  return hwPromise;
 }
+function warmHW() { if (!HW) hwDetect().catch(() => {}); }
 async function installedModels() {
   try {
     const r = await fetch(OLLAMA + '/api/tags', { signal: AbortSignal.timeout(2000) });
@@ -849,7 +1153,7 @@ async function installedModels() {
   } catch { return null; }
 }
 async function catalog() {
-  HW = HW || hwlib.detect();
+  HW = await hwDetect();
   const inst = await installedModels();
   return { hw: HW, ollama: inst !== null, installed: inst || [], rec: hwlib.recommend(MODELS, HW),
     models: MODELS.map(m => ({ ...m, fit: hwlib.fit(m, HW) })) };
@@ -917,7 +1221,14 @@ function git(args) {
     env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_NOSYSTEM: '1', GIT_OPTIONAL_LOCKS: '0' },
   }, (e, out) => res(e ? null : String(out))));
 }
+let gitCache = { root: null, at: 0, val: null };
 async function gitInfo() {
+  if (gitCache.val && gitCache.root === ROOT && Date.now() - gitCache.at < 2000) return gitCache.val;
+  const val = await gitInfoRaw();
+  gitCache = { root: ROOT, at: Date.now(), val };
+  return val;
+}
+async function gitInfoRaw() {
   let b = await git(['symbolic-ref', '--short', '-q', 'HEAD']);
   if (b === null) b = await git(['rev-parse', '--short', 'HEAD']);   // detached HEAD
   if (b === null) return { repo: false };
@@ -967,8 +1278,7 @@ async function sttInstall(size, emit, signal) {
     await downloadTo(url, zip, pct => emit({ status: T('Скачиваю программу распознавания…', 'Downloading the recognizer…'), pct }), signal);
     emit({ status: T('Распаковываю…', 'Unpacking…'), pct: null });
     const binDir = path.join(STT_DIR, 'bin'); fs.rmSync(binDir, { recursive: true, force: true }); fs.mkdirSync(binDir, { recursive: true });
-    const q = (x) => x.replace(/'/g, "''");
-    await new Promise((res, rej) => execFile('powershell', ['-NoProfile', '-Command', `Expand-Archive -LiteralPath '${q(zip)}' -DestinationPath '${q(binDir)}' -Force`], { windowsHide: true }, (e) => e ? rej(e) : res()));
+    extractZipInto(fs.readFileSync(zip), binDir);        // своя распаковка: пути из архива проверяются, за binDir выйти нельзя
     try { fs.unlinkSync(zip); } catch {}
     if (!sttBin()) throw new Error(T('В архиве не найден whisper-cli.exe', 'whisper-cli.exe was not found in the archive'));
   }
@@ -997,10 +1307,12 @@ function transcribe(wav, lang, size) {
 }
 function rawBody(req, limit = 40e6) {
   return new Promise((resolve, reject) => {
-    const chunks = []; let size = 0;
-    req.on('data', c => { size += c.length; if (size > limit) { reject(new Error(T('Слишком большая запись', 'Recording too large'))); req.destroy(); } else chunks.push(c); });
-    req.on('end', () => resolve(Buffer.concat(chunks)));
-    req.on('error', reject);
+    const chunks = []; let size = 0, tooBig = false, done = false;
+    const fail = (e) => { if (!done) { done = true; reject(e); } };
+    req.on('data', c => { if (tooBig) return; size += c.length; if (size > limit) { tooBig = true; chunks.length = 0; } else chunks.push(c); });
+    req.on('end', () => { if (done) return; if (tooBig) return fail(new HttpError(T('Слишком большая запись', 'Recording too large'), 413)); done = true; resolve(Buffer.concat(chunks)); });
+    req.on('error', fail);
+    req.on('aborted', () => fail(new HttpError(T('Запрос прерван', 'Request aborted'), 400)));
   });
 }
 async function handleSttInstall(b, res) {
@@ -1086,6 +1398,42 @@ function staticPath(pathname) {
   const f = path.join(fs.existsSync(pub) ? pub : __dirname, name);
   return fs.existsSync(f) ? f : null;
 }
+/* Статика: ETag + gzip/brotli из памяти. Файлы интерфейса небольшие, поэтому кэш держим целиком. */
+const staticCache = new Map();
+function staticEntry(f) {
+  const st = fs.statSync(f);
+  const key = f;
+  let e = staticCache.get(key);
+  if (e && e.mtimeMs === st.mtimeMs && e.size === st.size) return e;
+  const raw = fs.readFileSync(f);
+  e = { mtimeMs: st.mtimeMs, size: st.size, raw, gzip: null, br: null, etag: '"' + st.size.toString(16) + '-' + Math.round(st.mtimeMs).toString(16) + '"' };
+  staticCache.set(key, e);
+  return e;
+}
+function sendStatic(req, res, f) {
+  const ext = path.extname(f), headers = { 'Content-Type': MIME[ext] || 'application/octet-stream', 'Cache-Control': 'no-cache' };
+  if (ext === '.html') headers['Content-Security-Policy'] = CSP;
+  let e;
+  try { e = staticEntry(f); } catch { return res.writeHead(404).end(); }
+  headers.ETag = e.etag;
+  const inm = String(req.headers['if-none-match'] || '');
+  if (inm && inm.split(',').some(t => t.trim() === e.etag)) { res.writeHead(304, headers); return res.end(); }
+  const compressible = /\.(js|css|html|json|svg|txt)$/i.test(ext);
+  const ae = String(req.headers['accept-encoding'] || '');
+  let body = e.raw;
+  if (compressible) {
+    try {
+      if (/\bbr\b/.test(ae)) { e.br = e.br || zlib.brotliCompressSync(e.raw); body = e.br; headers['Content-Encoding'] = 'br'; }
+      else if (/\bgzip\b/.test(ae)) { e.gzip = e.gzip || zlib.gzipSync(e.raw, { level: 9 }); body = e.gzip; headers['Content-Encoding'] = 'gzip'; }
+    } catch {}
+    if (headers['Content-Encoding']) headers.Vary = 'Accept-Encoding';
+  }
+  headers['Content-Length'] = body.length;
+  res.writeHead(200, headers);
+  if (req.method === 'HEAD') return res.end();
+  res.end(body);
+}
+
 /* Заголовки безопасности — у всех ответов, включая потоковые. */
 const SEC_HEADERS = {
   'X-Content-Type-Options': 'nosniff',
@@ -1101,15 +1449,25 @@ const MAX_JSON_BODY = 30e6;
 const body = (req) => new Promise((resolve, reject) => {
   if (!/^application\/json\b/i.test(String(req.headers['content-type'] || '')))
     return reject(new HttpError(T('Нужен заголовок Content-Type: application/json', 'Content-Type: application/json is required'), 415));
-  const chunks = []; let size = 0;
-  req.on('data', c => { size += c.length; if (size > MAX_JSON_BODY) { reject(new HttpError(T('Слишком большой запрос', 'Request too large'), 413)); req.destroy(); } else chunks.push(c); });
-  req.on('end', () => {
-    try {
-      const o = chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {};
-      resolve(o && typeof o === 'object' && !Array.isArray(o) ? o : {});
-    } catch { reject(new HttpError(T('Некорректный JSON', 'Invalid JSON'), 400)); }
+  const chunks = []; let size = 0, tooBig = false, done = false;
+  const fail = (e) => { if (!done) { done = true; reject(e); } };
+  req.on('data', c => {
+    if (tooBig) return;
+    size += c.length;
+    if (size > MAX_JSON_BODY) { tooBig = true; chunks.length = 0; return; }   // не копим тело, но и не рвём ответ: клиент должен увидеть 413
+    chunks.push(c);
   });
-  req.on('error', reject);
+  req.on('end', () => {
+    if (done) return;
+    if (tooBig) return fail(new HttpError(T('Слишком большой запрос', 'Request too large'), 413));
+    let o;
+    try { o = chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {}; }
+    catch { return fail(new HttpError(T('Некорректный JSON', 'Invalid JSON'), 400)); }
+    done = true; resolve(o && typeof o === 'object' && !Array.isArray(o) ? o : {});
+  });
+  req.on('error', fail);
+  req.on('aborted', () => fail(new HttpError(T('Запрос прерван', 'Request aborted'), 400)));
+  req.on('close', () => { if (!req.complete) fail(new HttpError(T('Запрос прерван', 'Request aborted'), 400)); });
 });
 /* Сравнение токена без утечки по времени. */
 function tokenOk(v) {
@@ -1148,13 +1506,10 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (p === '/favicon.ico') { res.writeHead(204); return res.end(); }
-    if (req.method === 'GET' && !isApi) {
+    if ((req.method === 'GET' || req.method === 'HEAD') && !isApi) {
       const f = staticPath(p);
       if (!f) return json(404, { error: 'not found' });
-      const ext = path.extname(f), headers = { 'Content-Type': MIME[ext] || 'application/octet-stream', 'Cache-Control': 'no-cache' };
-      if (ext === '.html') headers['Content-Security-Policy'] = CSP;
-      res.writeHead(200, headers);
-      return res.end(fs.readFileSync(f));
+      return sendStatic(req, res, f);
     }
     if (p === '/api/health') return json(200, { ok: true, version: VERSION });
 
@@ -1168,8 +1523,47 @@ const server = http.createServer(async (req, res) => {
 
     if (p === '/api/integrity') { if (!only('GET')) return; return json(200, buildStatus()); }
     if (p === '/api/info') { if (!only('GET')) return; return json(200, { root: ROOT, name: path.basename(ROOT), platform: process.platform, version: VERSION, home: os.homedir(), defaults: conf.defaults || {}, recent: conf.recent || [], integrity: buildStatus() }); }
+    if (p === '/api/env') { if (!only('GET')) return; return json(200, await envInfo()); }
+    if (p === '/api/update-check') {
+      if (!only('GET')) return;
+      try { return json(200, await updateCheck()); }
+      catch (e) { return json(502, { error: T('Не удалось проверить обновления: ', 'Could not check for updates: ') + explain(e) }); }
+    }
+    if (p === '/api/replace') {
+      if (!only('POST')) return;
+      const b = await body(req);
+      if (!str(b.query, 500) || !String(b.query || '').trim()) return json(400, { error: T('Пустой запрос', 'Empty query') });
+      if (b.replacement != null && !str(b.replacement, 20000)) return json(400, { error: T('Слишком длинная замена', 'Replacement is too long') });
+      return json(200, replaceAllInProject(b.query, b.replacement, { regex: !!b.regex, dry: b.dry !== false, path: b.path }));
+    }
+    if (p === '/api/history') { if (!only('GET')) return; return json(200, { items: histList(url.searchParams.get('path') || '', Number(url.searchParams.get('limit')) || 50) }); }
+    if (p === '/api/history/restore') {
+      if (!only('POST')) return;
+      const b = await body(req);
+      if (!str(b.id, 64)) return json(400, { error: T('Не указана запись истории', 'History entry id is required') });
+      return json(200, histRestore(String(b.id)));
+    }
+    if (p === '/api/export') {
+      if (!only('GET')) return;
+      const zip = projectZipBytes();
+      const name = (path.basename(ROOT) || 'project').replace(/[^\w.-]+/g, '_') + '.zip';
+      res.writeHead(200, {
+        'Content-Type': 'application/zip',
+        'Content-Disposition': `attachment; filename="${name}"; filename*=UTF-8''${encodeURIComponent(name)}`,
+        'Content-Length': zip.length,
+      });
+      return res.end(zip);
+    }
+    if (p === '/api/import') {
+      if (!only('POST')) return;
+      const b = await body(req, 36e6);                       // base64 от 25 МБ — это ~34 МБ
+      if (!str(b.data, 34e6)) return json(400, { error: T('Архив не передан или слишком большой (до 25 МБ)', 'The archive is missing or too large (up to 25 MB)') });
+      let buf; try { buf = Buffer.from(String(b.data), 'base64'); } catch { return json(400, { error: T('Повреждённые данные архива', 'Damaged archive data') }); }
+      const r = importZip(buf);
+      return json(200, r);
+    }
     if (p === '/api/tree') { if (!only('GET')) return; return json(200, listDir(url.searchParams.get('path') || '')); }
-    if (p === '/api/files') { if (!only('GET')) return; return json(200, allFiles()); }
+    if (p === '/api/files') { if (!only('GET')) return; return json(200, cachedAllFiles()); }
     if (p === '/api/rules') { if (!only('GET')) return; return json(200, { rules: readRules() }); }
     if (p === '/api/file') {
       if (req.method === 'GET') {
@@ -1251,6 +1645,24 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+/* Адрес запущенного экземпляра: второй запуск не поднимает ещё один сервер, а открывает уже работающее окно. */
+const SESSION_FILE = path.join(CFG_DIR, 'session.json');
+function writeSession(url) {
+  try { fs.mkdirSync(CFG_DIR, { recursive: true }); fs.writeFileSync(SESSION_FILE, JSON.stringify({ port: PORT, url, pid: process.pid }), { mode: 0o600 }); } catch {}
+}
+function clearSession() {
+  try { const s = JSON.parse(fs.readFileSync(SESSION_FILE, 'utf8')); if (s.pid === process.pid) fs.unlinkSync(SESSION_FILE); } catch {}
+}
+async function existingInstance() {
+  try {
+    const s = JSON.parse(fs.readFileSync(SESSION_FILE, 'utf8'));
+    if (!s || !s.url) return null;
+    const tok = (String(s.url).split('#token=')[1] || '');
+    const r = await fetch('http://127.0.0.1:' + s.port + '/api/ping', { headers: { 'x-token': tok }, signal: AbortSignal.timeout(1500) });
+    return r.ok ? String(s.url) : null;
+  } catch { return null; }
+}
+
 if (require.main === module) {
 /* Тайм-ауты против «медленных» клиентов; локальному окну этого достаточно. */
 server.headersTimeout = 20000;
@@ -1268,13 +1680,34 @@ server.on('listening', () => {
   console.log('');
   if (argv.includes('--app') || argv.includes('--open')) ensureOllama();
   setTimeout(warmHW, 4000).unref();   // определение железа в отдельном процессе, чтобы не тормозить окно
+  writeSession(url);
+  process.on('exit', clearSession);
+  for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { clearSession(); process.exit(0); });
   if (argv.includes('--app')) openApp(url);
   else if (argv.includes('--open')) openBrowser(url);
 });
-server.on('error', (e) => {
-  if (e.code === 'EADDRINUSE' && argv.includes('--app') && PORT < BASE_PORT + 20) { PORT++; server.listen(PORT, HOST); return; }
+server.on('error', async (e) => {
+  if (e.code === 'EADDRINUSE') {
+    const url = await existingInstance();
+    if (url) {
+      if (argv.includes('--app')) {
+        console.log(T('  LocalCode уже запущен — открываю его окно.', '  LocalCode is already running — opening its window.'));
+        try { await openApp(url); } catch {}
+        console.log(T('  Откройте:     ', '  Open:          '), url);      // строку ждёт LocalCode.vbs
+      } else if (argv.includes('--open')) {
+        console.log(T('  LocalCode уже запущен — открываю его в браузере.', '  LocalCode is already running — opening it in the browser.'));
+        try { await openBrowser(url); } catch {}
+        console.log(T('  Откройте:     ', '  Open:          '), url);
+      } else {
+        console.log(T('  LocalCode уже запущен. Откройте: ', '  LocalCode is already running. Open: '), url);
+      }
+      process.exit(0);
+    }
+    if (argv.includes('--app') && PORT < BASE_PORT + 20) { PORT++; server.listen(PORT, HOST); return; }
+  }
   console.error(e.code === 'EADDRINUSE' ? T(`Порт ${PORT} занят. Запустите с другим: node server.js --port 3001`, `Port ${PORT} is busy. Start with another: node server.js --port 3001`) : e.message); process.exit(1);
 });
 server.listen(PORT, HOST);
 }
-module.exports = { HttpError, withKeys, keyState, resetKeys, classifyKeyError, safe, setRoot, replaceInFile, applyPatch, run, search, allFiles, listDir, findPaths, parseDdg, htmlToText, isPrivateHost, isPrivateIp, assertPublicUrl, assertProviderUrl, isSecretFile, fetchUrl, openTarget, VERSION };
+module.exports = { HttpError, withKeys, keyState, resetKeys, classifyKeyError, safe, setRoot, replaceInFile, applyPatch, run, search, allFiles, listDir, findPaths, parseDdg, htmlToText, isPrivateHost, isPrivateIp, assertPublicUrl, assertProviderUrl, isSecretFile, fetchUrl, openTarget, VERSION,
+  replaceAllInProject, histSnapshot, histList, histRestore, zipStore, readZip, zipSafeName, crc32, projectZipBytes, importZip, extractZipInto, envInfo, updateCheck, cmpVer };

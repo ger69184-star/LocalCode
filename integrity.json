@@ -2,15 +2,15 @@
   "v": 1,
   "alg": "ed25519",
   "app": "LocalCode",
-  "version": "0.8.1",
+  "version": "0.9.0",
   "files": {
-    "server.js": "fddfdbd8649700b1016df40bf8fcf1abc316267e26817fff94aacc5eed815182",
+    "server.js": "504e434a1a2dbbf57fd64e38534a22095d2cb70e3dde5c68310c04b299cc1766",
     "integrity.js": "0c7b3ebb3dcbe399341f4553882c4f4ff0d95d3c80d4edc9c24b5b0a91ddb7b8",
     "hw.js": "e670ab6751f61cfabc4eeb75263d01497e67efd3c27c5edcf2917973dcae4b02",
-    "public/index.html": "221a8d41f8b4fd417729de2846aa809cc2cc56888deee50e9bddf071e0cad429",
-    "public/app.js": "9b0e991c6506801e988545ed49b7f6cbbec24e615c534393bd2c7c13cfffc0c9",
-    "public/i18n.js": "98119e52534d0f19d6a19bc2e831283b9808051c8847a1f55547f1b0d79f4dac",
+    "public/index.html": "2c8c62bd9dda28b6a95d5a5bb7e8e74f315d2350778d0959debd7b9270ce2d5c",
+    "public/app.js": "1599cf6c5ab8df6487ee5707555389e67a9ecc9a51550d481de8753ef9d8a0bf",
+    "public/i18n.js": "3e711943e22e27111cd23e3064b454f290fa8d0e6f7d2e7b500a71af2bc7805b",
     "public/highlight.js": "8e18b52051a96a815f5aae3f5e6cd51d20a1353428686de7e075e32352c62846"
   },
-  "sig": "M1i9r1oz3SC-jiGwK6cQYK5GkIuLSciQ3ugBWTjqs8X4_rFc-vseMdhOi-wLYnUnLBnJgw6FpZWIpmgrtDbLCA"
+  "sig": "NUcq8mVxxVwqEiCsB5XpncbjuoqJCbOqbtDqD8F0DbyhlsTMDs_w0Ud_eDBDlZ5KvC7oK3b1Zlx87-CNU5xtCQ"
 }

@@ -84,4 +84,32 @@ test('автоключи: ошибки не про ключ не вызываю�
   assert.deepEqual(S.classifyKeyError({ status: 429, retryAfter: 5 }), { ms: 15000, reason: 'limit' });
   assert.equal(S.classifyKeyError({ status: 402 }).reason, 'balance'); assert.equal(S.classifyKeyError({ status: 500 }), null);
 });
+test('zip: сборка и чтение архива, опасные имена отбрасываются', () => {
+  const zip = S.zipStore([{ name: 'a.txt', data: Buffer.from('hello'), mtime: new Date() }]);
+  const files = S.readZip(zip);
+  assert.equal(files.length, 1); assert.equal(files[0].data.toString(), 'hello');
+  for (const bad of ['../evil', 'C:/evil', '/abs', 'a/../../b', '', 'a//b', './a']) assert.equal(S.zipSafeName(bad), null, bad);
+  assert.equal(S.zipSafeName('ok/dir/x.txt'), 'ok/dir/x.txt');
+  // «zip-бомба»: заявленный размер распакованного файла больше лимита — архив отклоняется до распаковки
+  const bomb = S.zipStore([{ name: 'a.txt', data: Buffer.from('x'), mtime: new Date() }]);
+  const cd = bomb.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]));
+  bomb.writeUInt32LE(30 * 1024 * 1024, cd + 24);
+  assert.throws(() => S.readZip(bomb), /слишком большой|too large/i);
+});
+test('zip: распаковка не выходит за пределы папки назначения', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lc-unz-'));
+  const zip = S.zipStore([{ name: 'inner/ok.txt', data: Buffer.from('ok'), mtime: new Date() }, { name: '../evil.txt', data: Buffer.from('x'), mtime: new Date() }]);
+  assert.equal(S.extractZipInto(zip, dir), 1);
+  assert.equal(fs.readFileSync(path.join(dir, 'inner', 'ok.txt'), 'utf8'), 'ok');
+  assert.equal(fs.existsSync(path.join(dir, '..', 'evil.txt')), false);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+test('replaceAllInProject: считает и заменяет, пустое совпадение отклоняется', () => {
+  w('rep1.txt', 'beta beta'); w('rep2.txt', 'gamma');
+  const dry = S.replaceAllInProject('beta', 'B', { dry: true });
+  assert.equal(dry.total, 2); assert.equal(dry.filesCount, 1); assert.equal(dry.partial, false);
+  assert.throws(() => S.replaceAllInProject('a*', 'x', { regex: true }), /пустой|empty/);
+  const applied = S.replaceAllInProject('beta', 'B', { dry: false });
+  assert.equal(applied.total, 2); assert.equal(r('rep1.txt'), 'B B'); assert.equal(r('rep2.txt'), 'gamma');
+});
 test.after(() => { fs.rmSync(tmp, { recursive: true, force: true }); });

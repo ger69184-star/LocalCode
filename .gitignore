@@ -14,3 +14,7 @@ node_modules/
 # закрытый ключ подписи — никогда
 integrity-keys/
 integrity-private.pem
+
+# портативный режим: настройки рядом с программой
+data/
+portable.txt

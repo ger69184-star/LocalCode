@@ -43,12 +43,25 @@ function ollamaBin() {
 }
 async function download(url, dest) {
   if (new URL(url).protocol !== 'https:') throw new Error('Разрешены только https-загрузки');
-  const r = await fetch(url); if (!r.ok) throw new Error('HTTP ' + r.status);
-  if (!/^https:/.test(r.url)) throw new Error('Загрузка перенаправлена на небезопасный адрес');
-  const total = +r.headers.get('content-length') || 0; let got = 0, last = 0;
+  const ac = new AbortController();
+  let timer = setTimeout(() => ac.abort(), 60000);          // нет данных минуту — прекращаем, а не висим вечно
   const out = fs.createWriteStream(dest);
-  for await (const chunk of r.body) { out.write(chunk); got += chunk.length; if (total && Date.now() - last > 500) { last = Date.now(); process.stdout.write(`\r  ${(got / 2 ** 20).toFixed(0)} / ${(total / 2 ** 20).toFixed(0)} МБ`); } }
-  await new Promise(r => out.end(r)); say('');
+  try {
+    const r = await fetch(url, { signal: ac.signal }); if (!r.ok) throw new Error('HTTP ' + r.status);
+    if (!/^https:/.test(r.url)) throw new Error('Загрузка перенаправлена на небезопасный адрес');
+    const total = +r.headers.get('content-length') || 0; let got = 0, last = 0;
+    for await (const chunk of r.body) {
+      clearTimeout(timer); timer = setTimeout(() => ac.abort(), 60000);
+      if (!out.write(chunk)) await new Promise(res => out.once('drain', res));   // не держим весь файл в памяти
+      got += chunk.length;
+      if (total && Date.now() - last > 500) { last = Date.now(); process.stdout.write(`\r  ${(got / 2 ** 20).toFixed(0)} / ${(total / 2 ** 20).toFixed(0)} МБ`); }
+    }
+    await new Promise(res => out.end(res));
+    say('');
+  } catch (e) {
+    try { out.destroy(); fs.unlinkSync(dest); } catch {}
+    throw e.name === 'AbortError' ? new Error('Нет данных от сервера загрузки (проверьте интернет или VPN)') : e;
+  } finally { clearTimeout(timer); }
 }
 async function installOllama() {
   if (WIN) {

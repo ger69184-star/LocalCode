@@ -106,7 +106,7 @@ async function llm(messages, { tools, onDelta, signal, opts, e } = {}) {
 }
 
 /* ================= Состояние ================= */
-let info = {}, files = [], rules = '', bootDone = false;
+let info = {}, files = [], rules = '';
 let tabs = [], activePath = null;
 const ed = $('#editor'), hl = $('#hl');
 const cur = () => tabs.find(t => t.path === activePath);
@@ -184,6 +184,247 @@ $('#sQ').addEventListener('keydown', async (e) => {
   } catch (er) { box.textContent = er.message; }
 });
 
+/* ================= Замена по всему проекту ================= */
+const sRepNote = (txt) => { $('#sRep').textContent = txt || ''; };
+let repPrevTimer = 0, repPreviewSeq = 0;
+async function previewReplace() {
+  const q = $('#sQ').value, rep = $('#sR').value, isRe = $('#sRegex').checked;
+  const seq = ++repPreviewSeq;
+  clearTimeout(repPrevTimer);
+  if (!q.trim() || q.trim().length < 2) { sRepNote(''); return; }
+  if (q.length > 500) { sRepNote(tr('rep_long')); return; }
+  sRepNote('…');
+  repPrevTimer = setTimeout(async () => {
+    try {
+      const r = await post('/api/replace', { query: q, replacement: rep, regex: isRe, dry: true });
+      if (seq !== repPreviewSeq) return;
+      sRepNote(r.total ? tr('rep_found', (r.partial ? '≥' : '') + r.total, r.filesCount) : tr('rep_none'));
+    } catch (e) { if (seq === repPreviewSeq) sRepNote(e.message); }
+  }, 600);
+}
+$('#sQ').addEventListener('input', previewReplace);
+$('#sRegex').addEventListener('change', previewReplace);
+$('#sReplace').onclick = async () => {
+  const q = $('#sQ').value, rep = $('#sR').value, isRe = $('#sRegex').checked, btn = $('#sReplace');
+  if (!q.trim()) { sRepNote(tr('rep_need')); return; }
+  if (!confirm(tr('rep_confirm', q.length > 60 ? q.slice(0, 60) + '…' : q, rep.length > 60 ? rep.slice(0, 60) + '…' : rep))) return;
+  btn.disabled = true; sRepNote(tr('rep_work'));
+  try {
+    const r = await post('/api/replace', { query: q, replacement: rep, regex: isRe, dry: false });
+    await reloadCleanTabs(); renderTree();
+    sRepNote(tr('rep_done', r.total, r.filesCount));
+    addMsg('sys', '<b>✔ ' + esc(tr('rep_done', r.total, r.filesCount)) + '</b><br>' + r.files.slice(0, 30).map(f => '• ' + esc(f.path) + ' — ' + f.count).join('<br>') + (r.files.length > 30 ? '<br>…' : ''));
+    refreshGitSoon();
+  } catch (e) { sRepNote(e.message); toast(e.message, 6000); }
+  finally { btn.disabled = false; }
+};
+/* Перечитать с диска вкладки без несохранённых правок (после замены/импорта). */
+async function reloadCleanTabs() {
+  let changed = false;
+  for (const t of tabs.slice()) {
+    if (t.dirty) continue;
+    try {
+      const { content } = await api('/api/file?path=' + encodeURIComponent(t.path));
+      if (content !== t.content) { t.content = content; changed = true; if (t.path === activePath) { ed.value = content; render.n = 0; render(); } }
+    } catch { tabs = tabs.filter(x => x !== t); changed = true; if (t.path === activePath) activePath = tabs.length ? tabs[tabs.length - 1].path : null; }
+  }
+  if (changed) { if (!cur()) { ed.value = ''; render.n = 0; render(); } renderTabs(); }
+}
+
+/* ================= История правок ================= */
+const fmtSize = (n) => n >= 1024 * 1024 ? (n / 1024 / 1024).toFixed(1) + L2(' МБ', ' MB') : n >= 1024 ? Math.round(n / 1024) + L2(' КБ', ' KB') : n + L2(' Б', ' B');
+function histTime(ts) {
+  const d = new Date(ts), p = (x) => String(x).padStart(2, '0'), now = new Date();
+  const time = p(d.getHours()) + ':' + p(d.getMinutes());
+  const sameDay = d.toDateString() === now.toDateString();
+  return sameDay ? tr('hist_today', time) : p(d.getDate()) + '.' + p(d.getMonth() + 1) + '.' + d.getFullYear() + ' ' + time;
+}
+async function openHistory() {
+  const p = cur() ? activePath : '';
+  const box = $('#histList'); box.textContent = tr('hist_load');
+  $('#histSub').textContent = p ? tr('hist_for', p) : tr('hist_all');
+  $('#hist').classList.add('open');
+  try {
+    const { items } = await api('/api/history?limit=100' + (p ? '&path=' + encodeURIComponent(p) : ''));
+    box.innerHTML = '';
+    if (!items.length) { box.textContent = tr('hist_empty'); return; }
+    for (const it of items) {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:7px 2px;border-bottom:1px solid var(--line)';
+      const info = document.createElement('div');
+      info.style.cssText = 'flex:1;min-width:0;overflow:hidden';
+      info.innerHTML = '<b style="font-size:12px;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(it.path) + '</b>' +
+        '<span class="hint">' + esc(histTime(it.ts)) + ' · ' + esc(fmtSize(it.size)) + (it.created ? ' · ' + esc(tr('hist_created')) : '') + '</span>';
+      const open = document.createElement('button'); open.className = 'ghost'; open.textContent = tr('hist_openfile');
+      open.onclick = async () => { closeHistory(); await openFile(it.path, true); };
+      const undo = document.createElement('button'); undo.textContent = tr('hist_restore');
+      undo.onclick = async () => {
+        undo.disabled = true;
+        try {
+          await post('/api/history/restore', { id: it.id });
+          const t = tabs.find(x => x.path === it.path);
+          if (t) t.dirty = false;
+          await reloadCleanTabs(); renderTree();
+          toast(tr('hist_restored', it.path), 3500);
+          closeHistory();
+        } catch (e) { toast(e.message, 5000); undo.disabled = false; }
+      };
+      row.append(info, open, undo);
+      box.appendChild(row);
+    }
+  } catch (e) { box.textContent = e.message; }
+}
+function closeHistory() { $('#hist').classList.remove('open'); }
+$('#histClose').onclick = closeHistory;
+$('#hist').onclick = (e) => { if (e.target.id === 'hist') closeHistory(); };
+
+/* ================= Поиск внутри файла (Ctrl+F) ================= */
+let findHits = [], findIdx = -1;
+function openFind() {
+  if (!cur()) return;
+  const bar = $('#findBar'); bar.style.display = 'flex';
+  const sel = ed.value.slice(ed.selectionStart, ed.selectionEnd);
+  if (sel && !sel.includes('\n') && sel.length < 120) $('#findIn').value = sel;
+  $('#findIn').focus(); $('#findIn').select(); findScan();
+}
+function closeFind() { $('#findBar').style.display = 'none'; findHits = []; findIdx = -1; ed.focus(); }
+function selectHit() {
+  if (!findHits.length) { $('#findCnt').textContent = tr('find_none'); return; }
+  const at = findHits[findIdx], len = $('#findIn').value.length;
+  ed.focus(); ed.setSelectionRange(at, at + len);
+  const line = ed.value.slice(0, at).split('\n').length;
+  ed.scrollTop = Math.max(0, (line - 3) * (parseFloat(getComputedStyle(ed).lineHeight) || 20));
+  syncScroll();
+  $('#findCnt').textContent = tr('find_cnt', findIdx + 1, findHits.length);
+}
+function findScan() {
+  const q = $('#findIn').value;
+  findHits = []; findIdx = -1;
+  if (!q) { $('#findCnt').textContent = ''; return; }
+  const v = ed.value.toLowerCase(), qq = q.toLowerCase();
+  let i = 0;
+  while (findHits.length < 5000) { const at = v.indexOf(qq, i); if (at < 0) break; findHits.push(at); i = at + Math.max(1, qq.length); }
+  if (!findHits.length) { $('#findCnt').textContent = tr('find_none'); return; }
+  const p = ed.selectionStart, near = findHits.findIndex(x => x >= p);
+  findIdx = near < 0 ? 0 : near;
+  selectHit();
+}
+function findStep(d) {
+  if (!findHits.length) return findScan();
+  findIdx = (findIdx + d + findHits.length) % findHits.length;
+  selectHit();
+}
+$('#findIn').addEventListener('input', findScan);
+$('#findIn').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); findStep(e.shiftKey ? -1 : 1); }
+  else if (e.key === 'Escape') { e.preventDefault(); closeFind(); }
+});
+$('#findNext').onclick = () => findStep(1);
+$('#findPrev').onclick = () => findStep(-1);
+$('#findClose').onclick = closeFind;
+
+/* ================= Окружение и обновления ================= */
+function envText(e) {
+  const gb = (n) => (n / 1024 / 1024 / 1024).toFixed(1) + L2(' ГБ', ' GB');
+  const lines = [
+    tr('env_ver') + ': ' + e.version + (e.portable ? ' · ' + tr('env_portable') : ''),
+    'Node.js: ' + e.node + ' · ' + e.platform + '/' + e.arch,
+    tr('env_port') + ': ' + e.port,
+    tr('env_root') + ': ' + e.root,
+    tr('env_cfg') + ': ' + e.cfgDir,
+  ];
+  if (e.memory) lines.push(tr('env_mem') + ': ' + gb(e.memory.free) + ' / ' + gb(e.memory.total));
+  if (e.disk) lines.push(tr('env_disk') + ': ' + gb(e.disk.free) + ' / ' + gb(e.disk.total));
+  lines.push('Git: ' + (e.git || tr('env_no')), 'Ollama: ' + (e.ollama ? tr('env_yes') : tr('env_no')),
+    tr('env_uptime') + ': ' + (e.uptime >= 3600 ? Math.round(e.uptime / 3600) + L2(' ч', ' h') : Math.max(1, Math.round(e.uptime / 60)) + L2(' мин', ' min')));
+  $('#envOut').textContent = lines.join('\n');
+}
+$('#envBtn').onclick = async () => {
+  const b = $('#envBtn'); b.disabled = true; $('#envOut').textContent = tr('env_wait');
+  try { envText(await api('/api/env')); } catch (e) { $('#envOut').textContent = e.message; }
+  finally { b.disabled = false; }
+};
+$('#updBtn').onclick = async () => {
+  const b = $('#updBtn'), out = $('#updOut'); b.disabled = true; out.textContent = tr('upd_wait');
+  try {
+    const u = await api('/api/update-check');
+    if (!u.latest) out.textContent = tr('upd_none', u.reason === 'no-releases' ? tr('upd_norelease') : (u.current || ''));
+    else if (u.newer) {
+      out.innerHTML = '';
+      const a = document.createElement('a'); a.href = u.url; a.target = '_blank'; a.rel = 'noopener noreferrer nofollow';
+      a.textContent = tr('upd_new', u.latest, u.current); out.appendChild(a);
+    } else out.textContent = tr('upd_latest', u.current);
+  } catch (e) { out.textContent = tr('upd_fail', e.message); }
+  finally { b.disabled = false; }
+};
+
+/* ================= ZIP: экспорт и импорт проекта ================= */
+const ZIP_MAX = 25 * 1024 * 1024;
+async function exportZip() {
+  const out = $('#zipOut'), b = $('#zipBtn'); b.disabled = true; out.textContent = tr('zip_wait');
+  try {
+    const r = await fetch('/api/export', { headers: H() });
+    if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || r.statusText); }
+    const blob = await r.blob(), a = document.createElement('a');
+    const d = new Date(), p2 = (n) => String(n).padStart(2, '0');
+    a.href = URL.createObjectURL(blob);
+    a.download = (info.name || 'project') + '-' + d.getFullYear() + p2(d.getMonth() + 1) + p2(d.getDate()) + '.zip';
+    document.body.appendChild(a); a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 5000);
+    out.textContent = tr('zip_done', fmtSize(blob.size));
+  } catch (e) { out.textContent = e.message; }
+  finally { b.disabled = false; }
+}
+function importZip(file) {
+  if (!file) return;
+  const out = $('#zipOut');
+  if (!/\.zip$/i.test(file.name)) { out.textContent = tr('zip_bad'); return; }
+  if (file.size > ZIP_MAX) { out.textContent = tr('zip_big'); return; }
+  const b = $('#unzipBtn'); b.disabled = true; out.textContent = tr('zip_unzip_wait');
+  const rd = new FileReader();
+  rd.onload = async () => {
+    try {
+      const b64 = String(rd.result).replace(/^data:[^,]*,/, '');
+      const r = await post('/api/import', { data: b64 });
+      out.textContent = tr('zip_unzip_done', r.saved, r.skipped);
+      await reloadCleanTabs(); renderTree(); refreshGitSoon();
+    } catch (e) { out.textContent = e.message; }
+    finally { b.disabled = false; $('#zipFile').value = ''; }
+  };
+  rd.onerror = () => { out.textContent = tr('zip_readfail'); b.disabled = false; };
+  rd.readAsDataURL(file);
+}
+$('#zipBtn').onclick = exportZip;
+$('#unzipBtn').onclick = () => $('#zipFile').click();
+$('#zipFile').addEventListener('change', (e) => importZip(e.target.files && e.target.files[0]));
+
+/* ================= Шаблоны файлов (локально, без сервера) ================= */
+function templates() { try { const o = JSON.parse(localStorage.lc_tpl || '{}'); return o && typeof o === 'object' ? o : {}; } catch { return {}; } }
+function saveTemplate() {
+  const t = cur();
+  if (!t) return toast(tr('tpl_nofile'));
+  const name = prompt(tr('tpl_name'), t.path.split('/').pop().replace(/\.[^.]+$/, ''));
+  if (!name) return;
+  const all = templates(); all[name] = t.content;
+  try { localStorage.lc_tpl = JSON.stringify(all); toast(tr('tpl_saved', name)); }
+  catch { toast(tr('tpl_full')); }
+}
+async function insertTemplate(name) {
+  const src = templates()[name];
+  if (src == null) return;
+  if (!confirm(tr('tpl_confirm', name))) return;
+  if (cur()) {
+    ed.value = src; cur().content = src; cur().dirty = true; render.n = 0; render(); scheduleAutosave(cur());
+  } else {
+    const p = prompt(tr('tpl_filename'), name + '.txt');
+    if (!p) return;
+    await openFile(p);
+    if (!cur()) return;
+    ed.value = src; cur().content = src; cur().dirty = true; render.n = 0; render();
+  }
+  toast(tr('tpl_inserted', name));
+}
+
 /* ================= Вкладки и редактор ================= */
 function renderTabs() {
   const box = $('#tabs'); box.innerHTML = '';
@@ -195,7 +436,22 @@ function renderTabs() {
   }
   $('#empty').hidden = !!tabs.length;
   $('#stLang').textContent = cur() ? langNow().toUpperCase() : '';
-  if (tabsReady && info.root) { try { localStorage['lc_tabs:' + info.root] = JSON.stringify({ paths: tabs.map(x => x.path), active: activePath }); } catch {} }
+  storeTabsSoon();
+}
+let tabsStoreTimer = 0;
+function storeTabsSoon() {
+  clearTimeout(tabsStoreTimer);
+  tabsStoreTimer = setTimeout(() => {
+    if (tabsReady && info.root) { try { localStorage['lc_tabs:' + info.root] = JSON.stringify({ paths: tabs.map(x => x.path), active: activePath }); } catch {} }
+  }, 300);
+}
+/* Точка «изменено» без перерисовки всех вкладок на каждое нажатие клавиши. */
+function markDirty(t) {
+  if (!t || t.dirty) return;
+  t.dirty = true;
+  const el = Array.from($('#tabs').children || []).find(x => x.title === t.path);
+  const x = el && el.querySelector('.x');
+  if (x) { const d = document.createElement('span'); d.className = 'dot'; d.textContent = '●'; el.insertBefore(d, x); }
 }
 let tabsReady = false;
 let rrId = 0;
@@ -219,6 +475,8 @@ function activate(p) {
   const t = cur(); ed.value = t ? t.content : ''; render.n = 0; render(); renderTabs(); renderTree(); syncScroll(); updateStatus();
   if (t) { ed.scrollTop = t.scroll || 0; syncScroll(); }
 }
+function pushRecent(f) { try { const a = JSON.parse(localStorage['lc_recent'] || '[]').filter(x => x !== f); a.unshift(f); localStorage['lc_recent'] = JSON.stringify(a.slice(0, 20)); } catch {} }
+function recentFiles() { try { return JSON.parse(localStorage['lc_recent'] || '[]'); } catch { return []; } }
 async function openFile(p, force) {
   let t = tabs.find(x => x.path === p);
   if (!t || force) {
@@ -228,7 +486,7 @@ async function openFile(p, force) {
     } catch (e) { toast(tr('cant_open', p, e.message)); return; }
   }
   const prev = cur(); if (prev) prev.scroll = ed.scrollTop;
-  activate(p);
+  activate(p); pushRecent(p);
 }
 function closeTab(p) {
   const t = tabs.find(x => x.path === p);
@@ -246,15 +504,27 @@ let asTimer = 0;
 function scheduleAutosave(t) { if (!cfg.autosave || !t) return; clearTimeout(asTimer); asTimer = setTimeout(() => { if (t.dirty && tabs.includes(t)) saveTab(t, true); }, uiCfg().asMs || 1000); }
 function syncScroll() { hl.style.transform = `translate(${-ed.scrollLeft}px,${-ed.scrollTop}px)`; $('#gutIn').style.transform = `translateY(${-ed.scrollTop + 0}px)`; }
 ed.addEventListener('scroll', syncScroll);
-ed.addEventListener('input', () => { const t = cur(); if (t) { t.content = ed.value; t.dirty = true; renderTabs(); scheduleAutosave(t); } clearGhost(true); scheduleRender(); scheduleAC(); });
+ed.addEventListener('input', () => {
+  const t = cur();
+  if (t) { t.content = ed.value; markDirty(t); scheduleAutosave(t); }
+  clearGhost(true); scheduleRender(); scheduleAC();
+});
 function goToLine(n) {
   const lines = ed.value.split('\n'); n = Math.max(1, Math.min(n, lines.length));
   const off = lines.slice(0, n - 1).reduce((a, l) => a + l.length + 1, 0);
   ed.focus(); ed.setSelectionRange(off, off + lines[n - 1].length); ed.scrollTop = Math.max(0, (n - 1) * (parseFloat(getComputedStyle(ed).lineHeight) || 20) - 120); syncScroll();
 }
+let stFrame = 0;
 function updateStatus() {
-  const p = ed.selectionStart, b = ed.value.slice(0, p), ln = b.split('\n');
-  $('#stPos').textContent = cur() ? tr('st_pos', ln.length, ln[ln.length - 1].length + 1) : '';
+  if (stFrame) return;
+  stFrame = requestAnimationFrame(() => {
+    stFrame = 0;
+    if (!cur()) { $('#stPos').textContent = ''; return; }
+    const v = ed.value, p = ed.selectionStart, b = v.slice(0, p), ln = b.split('\n');
+    let total = ln.length;
+    if (p < v.length) total += v.slice(p).split('\n').length - 1;
+    $('#stPos').textContent = tr('st_pos', ln.length, ln[ln.length - 1].length + 1) + ' · ' + tr('st_stats', total, v.length);
+  });
 }
 document.addEventListener('selectionchange', () => { if (document.activeElement === ed) { updateStatus(); if (ghost && ed.selectionStart !== ghost.pos) clearGhost(); } });
 
@@ -263,10 +533,55 @@ const ins = (t) => document.execCommand('insertText', false, t);
 const CLOSE = { '(': ')', '[': ']', '{': '}', '"': '"', "'": "'", '`': '`' };
 function lineRange() { const v = ed.value; const s = v.lastIndexOf('\n', ed.selectionStart - 1) + 1; let e = v.indexOf('\n', ed.selectionEnd); if (e < 0) e = v.length; return [s, e]; }
 function replaceLines(fn) { const [s, e] = lineRange(); const out = fn(ed.value.slice(s, e).split('\n')).join('\n'); ed.setSelectionRange(s, e); ins(out); ed.setSelectionRange(s, s + out.length); }
+/* ---- операции над строками: дублирование, удаление, перенос ---- */
+function duplicateSelection() {
+  const a = ed.selectionStart, b = ed.selectionEnd, v = ed.value;
+  if (a !== b) { ed.setSelectionRange(a, b); ins(v.slice(a, b)); ed.setSelectionRange(b, b + (b - a)); return; }
+  const [s, e] = lineRange();
+  ed.setSelectionRange(e, e); ins('\n' + v.slice(s, e));
+}
+function deleteLine() {
+  const v = ed.value, [s, e] = lineRange();
+  ed.setSelectionRange(s, e < v.length ? e + 1 : e); ins('');
+}
+function moveLines(dir) {
+  const v = ed.value, [s, e] = lineRange(), block = v.slice(s, e);
+  if (dir < 0) {
+    if (s === 0) return;
+    const ps = v.lastIndexOf('\n', s - 2) + 1, prev = v.slice(ps, s - 1);
+    ed.setSelectionRange(ps, e); ins(block + '\n' + prev);
+    ed.setSelectionRange(ps, ps + block.length);
+  } else {
+    if (e >= v.length) return;
+    const ne = v.indexOf('\n', e + 1), end = ne < 0 ? v.length : ne, next = v.slice(e + 1, end);
+    ed.setSelectionRange(s, end); ins(next + '\n' + block);
+    ed.setSelectionRange(s + next.length + 1, s + next.length + 1 + block.length);
+  }
+}
+function editWhole(fn) {
+  const v = ed.value;
+  let out; try { out = fn(v); } catch (e) { return toast(e.message, 5000); }
+  if (out === v) return toast(tr('ed_same'), 1500);
+  ed.setSelectionRange(0, v.length); ins(out);
+}
+const sortSelected = () => editWhole(v => {
+  const [s, e] = lineRange(), block = v.slice(s, e);
+  if (!block.trim()) throw new Error(tr('ed_needsel'));
+  return v.slice(0, s) + block.split('\n').sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' })).join('\n') + v.slice(e);
+});
+const trimTrailing = () => editWhole(v => v.split('\n').map(l => l.replace(/[ \t]+$/, '')).join('\n'));
+const formatJson = () => editWhole(v => {
+  let o; try { o = JSON.parse(v); } catch (e) { throw new Error(tr('ed_json_bad') + ' ' + e.message); }
+  return JSON.stringify(o, null, 2) + (v.endsWith('\n') ? '\n' : '');
+});
 ed.addEventListener('keydown', (e) => {
   if (ghost && e.key === 'Tab') { e.preventDefault(); acceptGhost(); return; }
   if (e.key === 'Escape' && ghost) { clearGhost(); return; }
   const mod = e.ctrlKey || e.metaKey;
+  if (mod && e.shiftKey && (e.key === 'K' || e.key === 'k')) { e.preventDefault(); deleteLine(); return; }
+  if (mod && !e.shiftKey && (e.key === 'd' || e.key === 'D')) { e.preventDefault(); duplicateSelection(); return; }
+  if (e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) { e.preventDefault(); moveLines(e.key === 'ArrowUp' ? -1 : 1); return; }
+  if (mod && !e.shiftKey && (e.key === 'f' || e.key === 'F')) { e.preventDefault(); openFind(); return; }
   if (mod && e.key === '/') { e.preventDefault(); const c = HL.commentOf(langNow()); if (!c) return; replaceLines(ls => { const all = ls.every(l => !l.trim() || l.trimStart().startsWith(c.trim())); return ls.map(l => !l.trim() ? l : all ? l.replace(c.trim() + ' ', '').replace(c.trim(), '') : l.replace(/^(\s*)/, '$1' + c)); }); return; }
   if (e.key === 'Tab') { e.preventDefault(); if (ed.selectionStart === ed.selectionEnd && !e.shiftKey) ins(IND()); else replaceLines(ls => ls.map(l => e.shiftKey ? l.replace(new RegExp('^( {1,' + IND().length + '}|\\t)'), '') : IND() + l)); return; }
   if (e.key === 'Enter' && !mod && !e.shiftKey && ed.selectionStart === ed.selectionEnd) {
@@ -810,6 +1125,21 @@ async function runIntent(it, raw) {
   }
 }
 
+/* Повторить последний запрос: из истории убирается прошлый ответ и его сообщения в окне. */
+function regenerate() {
+  if (busy) return toast(tr('c_wait'));
+  while (chatHist.length && chatHist[chatHist.length - 1].role !== 'user') chatHist.pop();
+  const last = chatHist[chatHist.length - 1];
+  if (!last || isToolRes(last)) return toast(tr('regen_none'));
+  const text = String(last.content).split(ATT_RE)[0];
+  chatHist.pop();
+  const nodes = [...$('#log').children];
+  let at = -1;
+  nodes.forEach((n, i) => { if (n.classList.contains('user')) at = i; });
+  if (at >= 0) nodes.slice(at).forEach(n => n.remove());
+  $('#prompt').value = text;
+  send();
+}
 async function send(opts = {}) {
   const raw = $('#prompt').value.trim(); if (!raw || busy) return;
   const e = ep();
@@ -822,6 +1152,7 @@ async function send(opts = {}) {
   const agent = !opts.quick && $('#chatMode').value === 'agent';
   const native = agent && ep().useTools, textAgent = agent && !native;
   const fctx = fileContext(!!opts.force), tStart = performance.now();
+  let lastShown = '';                                   // вне цикла: нужно и после выхода из него
   try {
     if (!opts.quick) { const it = routeIntent(raw); if (it) { await runIntent(it, raw); setBusy(false); return; } }
     for (let i = 0; i < (textAgent ? 8 : 25) && !stopFlag; i++) {
@@ -835,6 +1166,7 @@ async function send(opts = {}) {
       let tcall = null;
       if (textAgent && m.content) { tcall = parseTextTool(m.content); if (tcall) m = { ...m, content: m.content.slice(0, tcall.end) }; }
       const shown = textAgent ? visible(m.content || '') : m.content;
+      lastShown = shown || lastShown;
       if (shown) bub.innerHTML = md(shown); else bub.remove();
       chatHist.push(m); saveChat();
       if (tcall) {
@@ -846,7 +1178,8 @@ async function send(opts = {}) {
       for (const c of m.tool_calls) { const out = await runTool(c); chatHist.push({ role: 'tool', tool_call_id: c.id, content: out }); if (stopFlag) break; }
       saveChat();
     }
-    if (stopFlag) addMsg('sys', tr('stopped')); else if (uiCfg().sound && performance.now() - tStart > 3000) beep();
+    if (stopFlag) addMsg('sys', tr('stopped'));
+    else if (performance.now() - tStart > 3000) { const u = uiCfg(); if (u.sound) beep(); if (u.notify) notifyDone(lastShown); }
   } catch (er) {
     if (stopFlag || /Остановлено|Stopped|abort/i.test(er.message)) addMsg('sys', tr('stopped'));
     else {
@@ -910,19 +1243,36 @@ function paletteActions() {
     [L2('Терминал: показать или скрыть', 'Terminal: show or hide'), () => toggleTerm()], [L2('Терминал: очистить', 'Terminal: clear'), () => { clearTerm(); }],
     [L2('Git: статус', 'Git: status'), () => { toggleTerm(true); termRun('git status'); }],
     [L2('Git: сохранить изменения (коммит)…', 'Git: commit changes…'), () => { const m = prompt(L2('Описание изменений:', 'Commit message:'), L2('Правки', 'Update')); if (m) { toggleTerm(true); termRun('git add -A && git commit -m "' + m.replace(/["`$\\]/g, ' ') + '"'); } }],
-    [L2('Чат: новый чат', 'Chat: new chat'), () => $('#newChat').click()], [L2('Чат: сохранить в файл', 'Chat: export to a file'), () => exportChat()], [L2('Чат: скопировать последний ответ', 'Chat: copy the last answer'), () => copyLast()],
+    [L2('Чат: новый чат', 'Chat: new chat'), () => $('#newChat').click()], [L2('Чат: повторить последний запрос', 'Chat: retry the last request'), () => regenerate()], [L2('Чат: сохранить в файл', 'Chat: export to a file'), () => exportChat()], [L2('Чат: скопировать последний ответ', 'Chat: copy the last answer'), () => copyLast()],
     [L2('Чат: режим «Агент»', 'Chat: Agent mode'), () => { $('#chatMode').value = 'agent'; updateStatus(); }], [L2('Чат: режим «Вопрос»', 'Chat: Ask mode'), () => { $('#chatMode').value = 'ask'; updateStatus(); }],
     [L2('ИИ: режим «Офлайн»', 'AI: Offline mode'), sw('offline')], [L2('ИИ: режим «Онлайн»', 'AI: Online mode'), sw('online')],
     [L2('ИИ: сбросить паузы ключей', 'AI: clear key pauses'), async () => { await post('/api/keys/reset', {}); toast(tr('keys_reset_done')); }],
     [L2('Голос: начать или закончить запись (Alt+M)', 'Voice: start or stop recording (Alt+M)'), () => toggleVoice()],
     [L2('Вид: светлая или тёмная тема', 'View: light or dark theme'), () => $('#themeBtn').click()], [L2('Вид: настройки оформления', 'View: appearance settings'), () => openSettings()],
     [L2('Помощь: горячие клавиши (F1)', 'Help: hotkeys (F1)'), () => openHelp()],
+    [L2('Проект: история правок', 'Project: edit history'), () => openHistory()],
+    [L2('Проект: замена по всему проекту', 'Project: replace across the project'), () => { $('.stabs button[data-p=search]').click(); $('#sQ').focus(); }],
+    [L2('Проект: скачать в ZIP', 'Project: download as ZIP'), () => exportZip()],
+    [L2('Проект: загрузить ZIP', 'Project: upload a ZIP'), () => $('#zipFile').click()],
+    [L2('Программа: проверить окружение', 'App: check the environment'), () => { openSettings(); $('#envBtn').click(); }],
+    [L2('Программа: проверить обновления', 'App: check for updates'), () => { openSettings(); $('#updBtn').click(); }],
+    [L2('Файл: найти в файле (Ctrl+F)', 'File: find in file (Ctrl+F)'), () => openFind()],
+    [L2('Код: продублировать строку (Ctrl+D)', 'Code: duplicate line (Ctrl+D)'), () => duplicateSelection()],
+    [L2('Код: удалить строку (Ctrl+Shift+K)', 'Code: delete line (Ctrl+Shift+K)'), () => deleteLine()],
+    [L2('Код: переместить строки вверх (Alt+↑)', 'Code: move lines up (Alt+↑)'), () => moveLines(-1)],
+    [L2('Код: переместить строки вниз (Alt+↓)', 'Code: move lines down (Alt+↓)'), () => moveLines(1)],
+    [L2('Код: отсортировать выделенные строки', 'Code: sort selected lines'), () => sortSelected()],
+    [L2('Код: убрать пробелы в конце строк', 'Code: trim trailing spaces'), () => trimTrailing()],
+    [L2('Код: отформатировать JSON', 'Code: format JSON'), () => formatJson()],
+    [L2('Файл: сохранить как шаблон…', 'File: save as template…'), () => saveTemplate()],
+    ...Object.keys(templates()).map((n) => [L2('Шаблон: вставить «', 'Template: insert “') + n + '”', () => insertTemplate(n)]),
   ];
 }
 function renderQo() {
   const q = $('#qoIn').value.trim();
   if (q.startsWith('>')) { const w = q.slice(1).trim().toLowerCase(); qoItems = paletteActions().filter(a => !w || a[0].toLowerCase().includes(w)).map(a => ({ label: a[0], run: a[1] })); }
-  else qoItems = (q ? files.map(f => [f, fuzzy(q, f)]).filter(x => x[1] >= 0).sort((a, b) => b[1] - a[1]).map(x => x[0]) : files).slice(0, 60);
+  else if (q) qoItems = files.map(f => [f, fuzzy(q, f)]).filter(x => x[1] >= 0).sort((a, b) => b[1] - a[1]).map(x => x[0]).slice(0, 60);
+  else qoItems = [...new Set([...recentFiles().filter(f => files.includes(f)), ...files])].slice(0, 60);
   qoSel = Math.min(qoSel, Math.max(0, qoItems.length - 1));
   $('#qoList').innerHTML = ''; qoItems.forEach((f, i) => { const d = document.createElement('div'); d.className = 'mi' + (i === qoSel ? ' on' : ''); d.textContent = typeof f === 'string' ? f : f.label; d.onclick = () => pickQo(f); $('#qoList').appendChild(d); });
 }
@@ -1100,7 +1450,10 @@ $('#modal').onclick = (e) => { if (e.target.id === 'modal') { $('#modal').classL
 $('#help').onclick = (e) => { if (e.target.id === 'help') $('#help').classList.remove('open'); };
 $('#helpClose').onclick = () => $('#help').classList.remove('open');
 
-function applyTheme() { document.documentElement.dataset.theme = cfg.theme || 'dark'; applyUi(); }
+const sysLight = (typeof matchMedia === 'function') ? matchMedia('(prefers-color-scheme: light)') : null;
+const sysTheme = () => (sysLight && sysLight.matches ? 'light' : 'dark');
+function applyTheme() { document.documentElement.dataset.theme = cfg.theme === 'auto' ? sysTheme() : (cfg.theme || 'dark'); applyUi(); }
+if (sysLight && sysLight.addEventListener) sysLight.addEventListener('change', () => { if (cfg && cfg.theme === 'auto') applyTheme(); });
 $('#themeBtn').onclick = () => { cfg.theme = cfg.theme === 'light' ? 'dark' : 'light'; saveCfg(); applyTheme(); };
 function updateHeader() {
   $$('#modeSeg button').forEach(b => b.classList.toggle('on', b.dataset.m === cfg.mode));
@@ -1292,7 +1645,7 @@ function finishBrowser() {
 $('#mic').onclick = toggleVoice;
 
 /* ================= Оформление и кастомизация ================= */
-const UI_DEF = { accent: '', fs: 13, lh: 1.55, font: '', chatFs: 13, radius: 8, density: 'normal', lineNums: true, quick: true, tab: 2, css: '', uiFont: '', lig: false, ew: 400, syntax: 'default', chatStyle: 'bubbles', chatSide: 'right', anim: true, statusBar: true, wrapCode: false, asMs: 1000, acMs: 0, quickList: '', sound: false };
+const UI_DEF = { accent: '', fs: 13, lh: 1.55, font: '', chatFs: 13, radius: 8, density: 'normal', lineNums: true, quick: true, tab: 2, css: '', uiFont: '', lig: false, ew: 400, syntax: 'default', chatStyle: 'bubbles', chatSide: 'right', anim: true, statusBar: true, wrapCode: false, asMs: 1000, acMs: 0, quickList: '', sound: false, notify: false };
 const SWATCHES = ['#7c9cff', '#a78bfa', '#34d399', '#fbbf24', '#fb7185', '#22d3ee', '#f97316'];
 const uiCfg = () => ({ ...UI_DEF, ...((cfg && cfg.ui) || {}) });
 const IND = () => ' '.repeat(Math.max(1, Math.min(8, +uiCfg().tab || 2)));
@@ -1323,7 +1676,7 @@ function readUiForm() {
   return { accent: $('#fAccent').dataset.on === '1' ? $('#fAccent').value : '', fs: +$('#fFs').value, lh: +$('#fLh').value, font: $('#fFont').value, chatFs: +$('#fChatFs').value,
     radius: +$('#fRadius').value, density: $('#fDensity').value, lineNums: $('#fNums').checked, quick: $('#fQuick').checked, tab: +$('#fTab').value, css: $('#fCss').value,
     uiFont: $('#fUiFont').value, lig: $('#fLig').checked, ew: +$('#fEw').value, syntax: $('#fSyntax').value, chatStyle: $('#fChatStyle').value, chatSide: $('#fChatSide').value, anim: $('#fAnim').checked, statusBar: $('#fStatusBar').checked,
-    wrapCode: $('#fWrapCode').checked, asMs: Math.max(200, +$('#fAsMs').value || 1000), acMs: Math.max(0, +$('#fAcMs').value || 0), quickList: $('#fQuickList').value, sound: $('#fSound').checked };
+    wrapCode: $('#fWrapCode').checked, asMs: Math.max(200, +$('#fAsMs').value || 1000), acMs: Math.max(0, +$('#fAcMs').value || 0), quickList: $('#fQuickList').value, sound: $('#fSound').checked, notify: $('#fNotify').checked };
 }
 function loadUiForm(u) {
   const d = (typeof draft !== 'undefined' && draft) || cfg; u = u || { ...UI_DEF, ...(d.ui || {}) };
@@ -1331,11 +1684,14 @@ function loadUiForm(u) {
   $('#fFs').value = u.fs; $('#fLh').value = u.lh; $('#fFont').value = u.font; $('#fChatFs').value = u.chatFs; $('#fRadius').value = u.radius;
   $('#fDensity').value = u.density; $('#fNums').checked = u.lineNums !== false; $('#fQuick').checked = u.quick !== false; $('#fTab').value = u.tab; $('#fCss').value = u.css || '';
   $('#fUiFont').value = u.uiFont; $('#fLig').checked = !!u.lig; $('#fEw').value = u.ew; $('#fSyntax').value = u.syntax; $('#fChatStyle').value = u.chatStyle; $('#fChatSide').value = u.chatSide; $('#fAnim').checked = u.anim !== false;
-  $('#fStatusBar').checked = u.statusBar !== false; $('#fWrapCode').checked = !!u.wrapCode; $('#fAsMs').value = u.asMs; $('#fAcMs').value = u.acMs; $('#fQuickList').value = u.quickList || ''; $('#fSound').checked = !!u.sound;
+  $('#fStatusBar').checked = u.statusBar !== false; $('#fWrapCode').checked = !!u.wrapCode; $('#fAsMs').value = u.asMs; $('#fAcMs').value = u.acMs; $('#fQuickList').value = u.quickList || ''; $('#fSound').checked = !!u.sound; $('#fNotify').checked = !!u.notify;
   $('#fVoiceEngine').value = d.voiceEngine || 'whisper'; $('#fSttSize').value = d.sttSize || 'base'; $('#fVoiceAuto').checked = d.voiceAuto !== false;
   $('#swatches').innerHTML = SWATCHES.map(c => `<button type="button" class="sw" data-c="${c}" style="background:${c}" title="${c}"></button>`).join('');
   refreshSttState();
 }
+$('#fNotify').addEventListener('change', async (e) => {
+  if (e.target.checked && typeof Notification !== 'undefined' && Notification.permission === 'default') { try { await Notification.requestPermission(); } catch {} }
+});
 $('#uiBox').addEventListener('input', (e) => { if (e.target.id === 'fAccent') e.target.dataset.on = '1'; applyUi(readUiForm()); });
 $('#swatches').addEventListener('click', (e) => { const b = e.target.closest('.sw'); if (!b) return; $('#fAccent').value = b.dataset.c; $('#fAccent').dataset.on = '1'; applyUi(readUiForm()); });
 $('#fAccentReset').onclick = () => { $('#fAccent').dataset.on = '0'; applyUi(readUiForm()); };
@@ -1383,7 +1739,7 @@ function quickAction(k) {
   send({ force: true, quick: true });
 }
 
-function keyList() { return [['Ctrl+S', 'h_save'], ['Ctrl+P', 'h_open'], ['Ctrl+Shift+F', 'h_search'], ['Ctrl+`', 'h_term'], ['Ctrl+,', 'h_settings'], ['Ctrl+K', 'h_edit'], ['Ctrl+L', 'h_chat'], ['Tab', 'h_accept'], ['Ctrl+/', 'h_comment'], ['Tab / Shift+Tab', 'h_indent'], [L2('@файл', '@file'), 'h_mention'], ['Alt+M', 'h_voice'], ['F5', 'h_run'], ['Shift+F5', 'h_debug'], ['F1', 'h_help']]; }
+function keyList() { return [['Ctrl+S', 'h_save'], ['Ctrl+P', 'h_open'], ['Ctrl+Shift+F', 'h_search'], ['Ctrl+`', 'h_term'], ['Ctrl+,', 'h_settings'], ['Ctrl+K', 'h_edit'], ['Ctrl+L', 'h_chat'], ['Tab', 'h_accept'], ['Ctrl+/', 'h_comment'], ['Tab / Shift+Tab', 'h_indent'], ['Ctrl+F', 'h_find'], ['Ctrl+D', 'h_dup'], ['Ctrl+Shift+K', 'h_del'], ['Alt+↑ / Alt+↓', 'h_move'], ['Ctrl+G', 'h_goto'], [L2('@файл', '@file'), 'h_mention'], ['Alt+M', 'h_voice'], ['F5', 'h_run'], ['Shift+F5', 'h_debug'], ['F1', 'h_help']]; }
 function openHelp() { $('#helpList').innerHTML = keyList().map(([k, d]) => `<div class="kb"><kbd>${esc(k)}</kbd><span>${esc(tr(d))}</span></div>`).join(''); $('#help').classList.add('open'); }
 $('#helpBtn').onclick = openHelp;
 
@@ -1434,6 +1790,7 @@ addEventListener('keydown', (e) => {
   if (mod && k === 's') { e.preventDefault(); save(); }
   else if (mod && e.shiftKey && k === 'p') { e.preventDefault(); openQo('>'); }
   else if (mod && k === 'p') { e.preventDefault(); openQo(); }
+  else if (mod && k === 'g') { e.preventDefault(); const n = parseInt(prompt(L2('Перейти к строке:', 'Go to line:')), 10); if (n > 0) goToLine(n); }
   else if (mod && e.shiftKey && k === 'f') { e.preventDefault(); $('.stabs button[data-p=search]').click(); }
   else if (mod && k === '`') { e.preventDefault(); toggleTerm(); }
   else if (mod && k === ',') { e.preventDefault(); openSettings(); }
@@ -1446,7 +1803,7 @@ addEventListener('keydown', (e) => {
   else if (e.altKey && e.code === 'KeyM') { e.preventDefault(); e.stopPropagation(); if (!e.repeat) toggleVoice(); }
   else if (e.key === 'F1') { e.preventDefault(); openHelp(); }
   else if (e.key === 'F5') { e.preventDefault(); runCurrent(e.shiftKey); }
-  else if (e.key === 'Escape') { if (VS === 'rec') cancelVoice(); if ($('#modal').classList.contains('open')) applyTheme(); $('#modal').classList.remove('open'); $('#qo').classList.remove('open'); $('#help').classList.remove('open'); }
+  else if (e.key === 'Escape') { if (VS === 'rec') cancelVoice(); if ($('#findBar').style.display === 'flex') { closeFind(); return; } if ($('#modal').classList.contains('open')) applyTheme(); $('#modal').classList.remove('open'); $('#hist').classList.remove('open'); $('#qo').classList.remove('open'); $('#help').classList.remove('open'); }
 });
 addEventListener('beforeunload', (e) => { if (tabs.some(t => t.dirty)) { e.preventDefault(); e.returnValue = ''; } });
 
@@ -1469,7 +1826,7 @@ const ATT_RE = /\n\n(?:Прикреплённые файлы|Attached files):/;
   if (!chatHist.length) addMsg('sys', esc(tr(cfg.mode === 'offline' ? 'welcome_off' : 'welcome_on')));
   if (rules) addMsg('sys', esc(tr('rules_on')));
   await autoPickModel().catch(() => {});
-  await restoreTabs(saved); tabsReady = true; renderTabs(); bootDone = true;
+  await restoreTabs(saved); tabsReady = true; renderTabs();
   setInterval(() => { if (!document.hidden) refreshGit(); }, 20000);
 })();
 setInterval(() => { fetch('/api/ping', { headers: H() }).catch(() => {}); }, 10000);
@@ -1498,6 +1855,12 @@ async function copyLast() {
   try { await navigator.clipboard.writeText(visible(m.content)); toast(L2('Скопировано', 'Copied')); } catch { toast(L2('Не удалось скопировать', 'Could not copy')); }
 }
 $('#exportChat').onclick = exportChat;
+function notifyDone(text) {
+  try {
+    if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
+    new Notification('LocalCode', { body: String(text || '').replace(/\s+/g, ' ').trim().slice(0, 140) });
+  } catch {}
+}
 function beep() {
   try { const ac = new (window.AudioContext || window.webkitAudioContext)(), o = ac.createOscillator(), g = ac.createGain(); o.frequency.value = 880; g.gain.value = 0.06; o.connect(g); g.connect(ac.destination); o.start(); o.stop(ac.currentTime + 0.14); setTimeout(() => ac.close(), 400); } catch {}
 }

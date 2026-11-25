@@ -72,4 +72,13 @@ test('дымовой прогон: функции интерфейса вызы�
     "applyUi(UI_DEF)", "readUiForm()", "keysFromForm()", "updateStatus()", "textToolsPrompt()", "systemPrompt(false, true)", "activeTools()", "withCtx('')", "runCmdFor('a.py', true)", "downloadText('a.txt', 'x')"];
   for (const c of calls) { try { ev(c); } catch (e) { assert.fail(c + ' -> ' + e.message); } }
 });
+test('новые помощники: размер, время истории, окружение, клавиши', () => {
+  assert.equal(ev('fmtSize(900)'), '900 Б');
+  assert.match(ev('fmtSize(2048)'), /2 КБ/);
+  assert.match(ev('histTime(Date.now())'), /сегодня|today/);
+  assert.equal(ev('typeof envText'), 'function');
+  assert.ok(ev('keyList().length') >= 17);
+  assert.equal(ev("Object.keys(UI_DEF).includes('notify')"), true);
+  assert.equal(ev('Object.keys(templates()).length'), 0);
+});
 setTimeout(() => process.exit(process.exitCode || 0), 50).unref();

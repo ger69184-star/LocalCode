@@ -37,6 +37,8 @@
     <div id="pSearch" hidden>
       <input type="search" id="sQ" data-i18n-ph="s_ph" placeholder="Найти в проекте и Enter">
       <label class="chk sopt"><input type="checkbox" id="sRegex"> <span data-i18n="s_regex">Регулярное выражение</span></label>
+      <input type="search" id="sR" data-i18n-ph="s_ph_r" placeholder="Заменить на…">
+      <div class="row"><button class="ghost" id="sReplace" data-i18n="b_replace">Заменить всё</button><span class="hint" id="sRep"></span></div>
       <div id="sRes"></div>
     </div>
   </aside>
@@ -109,7 +111,23 @@
 <div id="menu" hidden></div>
 <div id="toast" hidden></div>
 
+<div id="findBar" style="position:fixed;top:64px;right:24px;z-index:45;display:none;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:8px 10px;box-shadow:var(--shadow);align-items:center;gap:6px">
+  <input type="search" id="findIn" data-i18n-ph="find_ph" placeholder="Найти в файле" style="width:200px">
+  <span class="hint" id="findCnt"></span>
+  <button class="ghost" id="findPrev" type="button" data-i18n-title="find_prev" title="Предыдущее">↑</button>
+  <button class="ghost" id="findNext" type="button" data-i18n-title="find_next" title="Следующее">↓</button>
+  <button class="ghost" id="findClose" type="button" data-i18n-title="find_close" title="Закрыть">✕</button>
+</div>
+
 <div class="overlay" id="qo"><div id="qoBox"><input type="text" id="qoIn" data-i18n-ph="q_ph" placeholder="Имя файла…" autocomplete="off"><div id="qoList"></div></div></div>
+
+<div class="overlay" id="hist"><div id="histCard" style="background:var(--panel);border:1px solid var(--line);border-radius:calc(var(--r) + 8px);padding:16px 18px;width:min(640px,94vw);max-height:88vh;overflow:auto;display:flex;flex-direction:column;gap:8px;box-shadow:var(--shadow);margin:auto">
+  <b style="font-size:15px" data-i18n="hist_title">История правок</b>
+  <div class="hint" id="histSub"></div>
+  <div class="hint" data-i18n="hist_note">Каждая правка сохраняется, и файл можно вернуть к состоянию до неё. Хранятся последние 300 записей.</div>
+  <div id="histList"></div>
+  <div class="row" style="justify-content:flex-end"><button id="histClose" data-i18n="h_close">Закрыть</button></div>
+</div></div>
 
 <div class="overlay" id="help"><div id="helpCard">
   <b style="font-size:15px" data-i18n="h_title">Горячие клавиши</b>
@@ -148,7 +166,7 @@
     <label class="chk"><input type="checkbox" id="fAC"> <span data-i18n="f_ac">Автодополнение кода по Tab</span></label>
     <label class="chk"><input type="checkbox" id="fWeb"> <span data-i18n="f_web">Разрешить ИИ искать в интернете и читать страницы (запросы уходят в DuckDuckGo)</span></label>
     <label class="chk"><input type="checkbox" id="fAutosave"> <span data-i18n="f_autosave">Автосохранение</span></label>
-    <label class="f"><span data-i18n="f_theme">Тема</span><select id="fTheme"><option value="dark" data-i18n="th_dark">Тёмная</option><option value="light" data-i18n="th_light">Светлая</option><option value="midnight" data-i18n="th_midnight">Полночь</option><option value="dracula" data-i18n="th_dracula">Фиолетовая</option><option value="forest" data-i18n="th_forest">Лесная</option><option value="sunset" data-i18n="th_sunset">Закат</option><option value="contrast" data-i18n="th_contrast">Высокий контраст</option></select></label>
+    <label class="f"><span data-i18n="f_theme">Тема</span><select id="fTheme"><option value="auto" data-i18n="th_auto">Как в системе</option><option value="dark" data-i18n="th_dark">Тёмная</option><option value="light" data-i18n="th_light">Светлая</option><option value="midnight" data-i18n="th_midnight">Полночь</option><option value="dracula" data-i18n="th_dracula">Фиолетовая</option><option value="forest" data-i18n="th_forest">Лесная</option><option value="sunset" data-i18n="th_sunset">Закат</option><option value="contrast" data-i18n="th_contrast">Высокий контраст</option></select></label>
     <label class="f"><span data-i18n="f_lang">Язык интерфейса</span><select id="fLang"><option value="ru">Русский</option><option value="en">English</option></select></label>
     <label class="f"><span data-i18n="f_sysprompt">Постоянный промпт</span><textarea id="fPrompt" rows="4" data-i18n-ph="f_sysprompt_ph"></textarea></label>
     <label class="chk"><input type="checkbox" id="fVoiceSend"> <span data-i18n="f_vsend">Голос: отправлять сразу после распознавания</span></label>
@@ -180,6 +198,7 @@
     <label class="chk"><input type="checkbox" id="fStatusBar"> <span data-i18n="f_statusbar">Показывать нижнюю строку состояния</span></label>
     <label class="chk"><input type="checkbox" id="fWrapCode"> <span data-i18n="f_wrapcode">Переносить длинные строки кода в чате</span></label>
     <label class="chk"><input type="checkbox" id="fSound"> <span data-i18n="f_sound">Звук, когда долгий ответ готов</span></label>
+    <label class="chk"><input type="checkbox" id="fNotify"> <span data-i18n="f_notify">Уведомление в системе, когда долгий ответ готов</span></label>
     <label class="f"><span data-i18n="f_quicklist">Свои быстрые кнопки чата: по одной в строке, «Название | что попросить». Пусто — стандартные. {file} — имя открытого файла</span><textarea id="fQuickList" rows="3" spellcheck="false" class="secret show" placeholder="Кратко | Перескажи {file} в трёх предложениях"></textarea></label>
     <label class="chk"><input type="checkbox" id="fNums"> <span data-i18n="f_nums">Показывать номера строк</span></label>
     <label class="chk"><input type="checkbox" id="fQuick"> <span data-i18n="f_quick">Быстрые кнопки над полем ввода в чате</span></label>
@@ -196,6 +215,11 @@
     <div class="hint" id="buildState"></div>
     <div class="hint" id="aboutVer"></div>
     <div class="hint" data-i18n="about_free">Программа бесплатная: ни ключей, ни подписки, ни пробного периода — все функции доступны сразу.</div>
+    <div class="row"><button type="button" id="envBtn" data-i18n="about_env">Проверить окружение</button><button type="button" id="updBtn" data-i18n="about_upd">Проверить обновления</button></div>
+    <div class="hint" id="envOut" style="white-space:pre-line"></div>
+    <div class="hint" id="updOut"></div>
+    <div class="row"><button type="button" id="zipBtn" data-i18n="about_zip">Скачать проект в ZIP</button><button type="button" id="unzipBtn" data-i18n="about_unzip">Загрузить ZIP в проект</button><input type="file" id="zipFile" accept=".zip,application/zip" hidden></div>
+    <div class="hint" id="zipOut"></div>
     <div class="hint" data-i18n="about_crack">Здесь видно, совпадают ли файлы программы с официальной подписанной сборкой. «Кряки» и чужие сборки часто содержат вирусы: скачивайте LocalCode только с официального источника.</div>
   </fieldset>
   <div class="row" style="justify-content:flex-end"><button id="setCancel" data-i18n="cancel">Отмена</button><button class="primary" id="setSave" data-i18n="save">Сохранить</button></div>
