@@ -96,14 +96,16 @@ LocalCode — локальный редактор кода с ИИ. Сервер
   В интерфейсе хранится не больше 400 000 символов вывода.
 - Тело запроса — только JSON, до 30 МБ (аудио — до 40 МБ), с таймаутами на чтение.
 
-## Лицензия и целостность
+## Подлинность сборки и предупреждения об опасном коде
 
-Проверка лицензии выполняется на сервере, офлайн, по подписи Ed25519 (`license.js`,
-`license-pub.pem`, `license-policy.json`). Без действующего ключа после пробного периода
-блокируются только ИИ-маршруты (`/api/chat`, `/api/tool`, `/api/models`, `/api/stt*`,
-`/api/term/run` и подобные); редактор и файлы остаются доступны. `integrity.json` —
-подписанный список sha256 основных файлов; `public/style.css` в него намеренно не входит,
-поэтому оформление можно менять. Подробности и выпуск ключей — в `LICENSING.md`.
+Ключей активации нет: программа бесплатная. `integrity.json` — подписанный список sha256
+основных файлов, `integrity-pub.pem` — открытый ключ. Состояние видно в «Настройки → О программе»:
+`official` (файлы совпадают), `modified` (файлы изменены), `tampered` (подпись подделана),
+`unsigned` (сборка из исходников). `public/style.css` намеренно не входит в манифест.
+
+При записи файлов и запуске команд сервер ищет типичные вирусные приёмы (скачать и выполнить,
+скрытый PowerShell, автозапуск, майнер, кража паролей, reverse shell) и показывает предупреждение
+с номером строки. Работа при этом не блокируется. Подробности и подпись релизов — в `INTEGRITY.md`.
 
 ## Если что-то пошло не так
 
@@ -125,6 +127,7 @@ LAN and cloud-metadata addresses (DNS answers and every redirect are checked). `
 actions require confirmation. API keys live in browser `localStorage` and are not encrypted; the
 terminal can run arbitrary commands by design. Do not expose the port or open the app on an untrusted machine.
 
-License checks run server-side and offline (Ed25519 signature, `license.js`). After the trial, AI
-endpoints require a valid key; the editor and file operations stay available. `integrity.json` is a signed
-manifest of the main files (styles are excluded on purpose). See `LICENSING.md`.
+The app is free: there are no activation keys. `integrity.json` is a signed manifest of the main files
+(styles are excluded on purpose); the build state is shown under Settings → About. Writes and terminal
+commands are scanned for common malware patterns and produce a warning with the line number, without
+blocking the work. See `INTEGRITY.md`.

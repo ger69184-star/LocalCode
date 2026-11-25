@@ -11,7 +11,7 @@ const net = require('net');
 const dns = require('dns').promises;
 const { exec, execFile, spawn } = require('child_process');
 const hwlib = require('./hw');
-const licensing = require('./license');
+const integrity = require('./integrity');
 
 // Язык сообщений сервера: берётся из заголовка x-lang (по умолчанию — язык системы)
 let SLANG = /^ru/i.test(Intl.DateTimeFormat().resolvedOptions().locale || '') ? 'ru' : 'en';
@@ -55,34 +55,18 @@ const saveConf = () => {
   } catch { try { fs.unlinkSync(tmp); } catch {} }
 };
 
-/* ---------- лицензия (офлайн-проверка подписи, см. license.js и LICENSING.md) ---------- */
-const LIC = licensing.create({ appDir: __dirname, cfgDir: CFG_DIR, log });
-/* Эти возможности требуют действующей лицензии (после пробного периода).
-   Редактор, файлы, git и просмотр остаются доступны всегда — это режим «только чтение». */
-const LICENSED_ENDPOINTS = new Set([
-  '/api/chat', '/api/complete', '/api/tool', '/api/models', '/api/keys/test', '/api/keys/reset',
-  '/api/pull', '/api/catalog', '/api/installed', '/api/stt', '/api/stt/install', '/api/term/run',
-]);
-LIC.init();
-function licReason(code) {
-  switch (code) {
-    case 'malformed': return T('Ключ повреждён или скопирован не полностью.', 'The key is damaged or was copied only partly.');
-    case 'signature': return T('Подпись не совпадает: ключ выпущен не для этой программы.', 'The signature does not match: this key was not issued for this app.');
-    case 'expired': return T('Срок действия ключа истёк.', 'This key has expired.');
-    case 'machine': return T('Ключ выдан для другого компьютера. Скопируйте ID компьютера в настройках и попросите новый ключ.', 'The key was issued for another computer. Copy the machine ID in Settings and request a new key.');
-    case 'disabled': return T('Лицензирование в этой сборке не настроено.', 'Licensing is not configured in this build.');
-    default: return T('Ключ не подошёл.', 'The key was not accepted.');
-  }
+/* ---------- подлинность сборки (официальная подпись, см. integrity.js и INTEGRITY.md) ---------- */
+const buildStatus = () => integrity.status(__dirname);
+const BUILD0 = buildStatus();
+if (BUILD0.state === 'modified' || BUILD0.state === 'tampered') {
+  log('integrity: сборка отличается от подписанной', (BUILD0.files || []).join(', '), '— если вы не меняли код, скачайте программу заново с официального источника');
 }
-function licenseGate(p) {
-  if (!LICENSED_ENDPOINTS.has(p)) return null;
-  const g = LIC.gate();
-  if (g.ok) return null;
-  return {
-    error: T('Нужна действующая лицензия. Откройте «Настройки → Лицензия» и введите ключ.', 'A valid license is required. Open “Settings → License” and enter your key.'),
-    code: 'license', license: LIC.publicStatus(),
-  };
-}
+/* Предупреждения о типичных вирусных приёмах в коде — не блокируют работу. */
+const warnList = (text) => integrity.scanSuspicious(text).map(w => ({
+  id: w.id,
+  text: T(w.ru, w.en) + ' ' + T('(строка ' + w.line + ')', '(line ' + w.line + ')'),
+}));
+const warnText = (ws) => ws.length ? T('ВНИМАНИЕ: в коде есть опасные конструкции — ', 'WARNING: the code contains dangerous patterns — ') + ws.map(w => w.text).join('; ') + T('. Проверьте код перед запуском.', '. Review the code before running it.') : '';
 
 let ROOT;
 function setRoot(p) {
@@ -226,7 +210,7 @@ function writeFile(p, content, allowHome = false) {
   const before = fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : null;
   fs.mkdirSync(path.dirname(f), { recursive: true });
   fs.writeFileSync(f, content, 'utf8');
-  return before;
+  return { before, warnings: warnList(content) };
 }
 function replaceInFile(p, oldStr, newStr, allowHome = false) {
   if (typeof oldStr !== 'string' || oldStr === '') throw new Error(T('old_str пустой: укажите фрагмент, который нужно заменить', 'old_str is empty: give the fragment to replace'));
@@ -540,10 +524,10 @@ async function tool(name, a) {
     case 'find_path': { const r = findPaths(a.query, a.where); return { result: r.length ? JSON.stringify(r) : T('Ничего не найдено', 'Nothing found') }; }
     case 'list_dir': return { result: JSON.stringify(listDir(a.path || '', true)) };
     case 'read_file': return { result: readFile(a.path, true) };
-    case 'write_file': { const before = writeFile(a.path, a.content, true); return { result: 'OK', before }; }
-    case 'replace_in_file': { const before = replaceInFile(a.path, a.old_str, a.new_str, true); return { result: 'OK', before }; }
+    case 'write_file': { const w = writeFile(a.path, a.content, true); return { result: 'OK' + (w.warnings.length ? ' ' + warnText(w.warnings) : ''), before: w.before, warnings: w.warnings }; }
+    case 'replace_in_file': { const before = replaceInFile(a.path, a.old_str, a.new_str, true); const warnings = warnList(fs.readFileSync(safe(a.path, true), 'utf8')); return { result: 'OK' + (warnings.length ? ' ' + warnText(warnings) : ''), before, warnings }; }
     case 'search': return { result: search(a.query, a.path, !!a.regex, true) };
-    case 'apply_patch': { const before = applyPatch(a.path, a.patch, true); return { result: 'OK', before }; }
+    case 'apply_patch': { const before = applyPatch(a.path, a.patch, true); const warnings = warnList(fs.readFileSync(safe(a.path, true), 'utf8')); return { result: 'OK' + (warnings.length ? ' ' + warnText(warnings) : ''), before, warnings }; }
     case 'web_search': return { result: await webSearch(a.query) };
     case 'fetch_url': return { result: await fetchUrl(a.url) };
     case 'run_command': return { result: await run(a.command, a.timeout, a.shell) };
@@ -1066,6 +1050,7 @@ function handleTermRun(b, res) {
   child = ps ? spawn('powershell.exe', ['-NoProfile', '-NoLogo', '-Command', full], { cwd, windowsHide: true, env: UTF_ENV }) : spawn(full, [], { cwd, shell: true, windowsHide: true, env: UTF_ENV });
   const id = ++termSeq; TERMS.set(id, child);
   emit({ t: 'start', id, cwd });
+  for (const w of warnList(cmd)) emit({ t: 'warn', v: T('⚠ Опасная команда: ', '⚠ Dangerous command: ') + w.text + '\n' });
   child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
   child.stdout.on('data', d => emit({ t: 'out', v: d })); child.stderr.on('data', d => emit({ t: 'err', v: d }));
   const timer = setTimeout(() => { emit({ t: 'err', v: T('\n[остановлено: прошло 30 минут]\n', '\n[stopped: 30 minutes passed]\n') }); killTree(child); }, 30 * 60 * 1000);
@@ -1181,22 +1166,8 @@ const server = http.createServer(async (req, res) => {
     const only = (m) => { if (req.method === m) return true; json(405, { error: 'method not allowed' }); return false; };
     const str = (v, max = 1e6) => typeof v === 'string' && v.length <= max;
 
-    /* Лицензия: статус и активация не блокируются лицензией. */
-    if (p === '/api/license') { if (!only('GET')) return; return json(200, LIC.publicStatus()); }
-    if (p === '/api/license/activate') {
-      if (!only('POST')) return;
-      const b = await body(req);
-      if (!str(b.token, 8192) || String(b.token).length < 40) return json(400, { error: T('Ключ пустой или слишком короткий', 'The key is empty or too short'), license: LIC.publicStatus() });
-      try { LIC.activate(String(b.token).trim()); }
-      catch (e) { return json(400, { error: licReason(e.code), reason: e.code, code: 'license', license: LIC.publicStatus() }); }
-      return json(200, LIC.publicStatus());
-    }
-    if (p === '/api/license/remove') { if (!only('POST')) return; LIC.remove(); return json(200, LIC.publicStatus()); }
-
-    const blocked = licenseGate(p);
-    if (blocked) return json(403, blocked);
-
-    if (p === '/api/info') { if (!only('GET')) return; return json(200, { root: ROOT, name: path.basename(ROOT), platform: process.platform, home: os.homedir(), defaults: conf.defaults || {}, recent: conf.recent || [], license: LIC.publicStatus() }); }
+    if (p === '/api/integrity') { if (!only('GET')) return; return json(200, buildStatus()); }
+    if (p === '/api/info') { if (!only('GET')) return; return json(200, { root: ROOT, name: path.basename(ROOT), platform: process.platform, version: VERSION, home: os.homedir(), defaults: conf.defaults || {}, recent: conf.recent || [], integrity: buildStatus() }); }
     if (p === '/api/tree') { if (!only('GET')) return; return json(200, listDir(url.searchParams.get('path') || '')); }
     if (p === '/api/files') { if (!only('GET')) return; return json(200, allFiles()); }
     if (p === '/api/rules') { if (!only('GET')) return; return json(200, { rules: readRules() }); }
@@ -1210,7 +1181,7 @@ const server = http.createServer(async (req, res) => {
       const b = await body(req);
       if (!str(b.path) || !b.path) return json(400, { error: T('Не указан путь', 'Path is required') });
       if (!str(b.content, MAX_JSON_BODY)) return json(400, { error: T('Неверное содержимое', 'Invalid content') });
-      return json(200, { before: writeFile(b.path, b.content) });
+      const w = writeFile(b.path, b.content); return json(200, { before: w.before, warnings: w.warnings });
     }
     if (p === '/api/tool') {
       if (!only('POST')) return;

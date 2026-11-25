@@ -9,8 +9,8 @@ node_modules/
 .env.*.local
 *.pem
 *.key
-# …но открытый ключ лицензий должен попасть в поставку
-!license-pub.pem
-# закрытые ключи лицензий — никогда
-license-keys/
-license-private.pem
+# …но открытый ключ подписи сборок должен попасть в поставку
+!integrity-pub.pem
+# закрытый ключ подписи — никогда
+integrity-keys/
+integrity-private.pem

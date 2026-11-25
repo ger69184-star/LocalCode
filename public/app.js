@@ -23,18 +23,19 @@ async function api(path, opts = {}) {
   const j = await r.json().catch(() => ({ error: tr('err_resp') }));
   if (!r.ok) {
     const ew = new Error(j.error || r.statusText);
-    ew.code = j.code; ew.reason = j.reason; ew.license = j.license;
-    if (j.code === 'license') {
-      if (j.license) { info.license = j.license; try { renderLicense(); } catch {} }
-      toast(ew.message, 6000);
-      if (!api.licShown && bootDone) { api.licShown = true; try { openSettings(); } catch {} }
-    }
+    ew.code = j.code; ew.warnings = j.warnings;
     throw ew;
   }
   return j;
 }
 const post = (p, d, signal) => api(p, { method: 'POST', body: JSON.stringify(d), signal });
 function toast(t, ms = 2500) { const e = $('#toast'); e.textContent = t; e.hidden = false; clearTimeout(toast.t); toast.t = setTimeout(() => e.hidden = true, ms); }
+/* Код с типичными вирусными приёмами не блокируем, но громко предупреждаем. */
+function flashWarnings(list) {
+  if (!Array.isArray(list) || !list.length) return;
+  addMsg('sys', '<b>⚠ ' + esc(tr('warn_code')) + '</b><br>' + list.map(w => '• ' + esc(w.text)).join('<br>') + '<br>' + esc(tr('warn_code2')));
+  toast(tr('warn_code'), 7000);
+}
 
 /* ================= Конфиг ================= */
 const PRESETS = {
@@ -237,7 +238,7 @@ function closeTab(p) {
 }
 async function saveTab(t, quiet) {
   const snap = t.content;
-  try { await post('/api/file', { path: t.path, content: snap }); if (t.content === snap) t.dirty = false; renderTabs(); if (!quiet) toast(tr('saved'), 900); refreshGitSoon(); }
+  try { const r = await post('/api/file', { path: t.path, content: snap }); if (r.warnings) flashWarnings(r.warnings); if (t.content === snap) t.dirty = false; renderTabs(); if (!quiet) toast(tr('saved'), 900); refreshGitSoon(); }
   catch (e) { toast(e.message); }
 }
 function save() { const t = cur(); if (t) return saveTab(t, false); }
@@ -396,6 +397,7 @@ async function termRun(command) {
         if (o.t === 'start') { termProc = o.id; termCwd = o.cwd; $('#cwd').textContent = o.cwd; }
         else if (o.t === 'out') { termPrint(o.v); if (out.length < 400000) out += o.v; }
         else if (o.t === 'err') { termPrint(o.v, 'te'); if (out.length < 400000) out += o.v; }
+        else if (o.t === 'warn') { termPrint(o.v, 'te'); toast(L2('⚠ В команде есть опасные конструкции', '⚠ The command contains dangerous patterns'), 5000); }
         else if (o.t === 'cwd') { termCwd = o.v; $('#cwd').textContent = o.v; }
         else if (o.t === 'exit') code = o.code;
       }
@@ -552,6 +554,7 @@ async function runTool(call) {
   if (!(await askApproval(name, args))) { body.innerHTML = '<pre>' + esc(tr('denied')) + '</pre>'; return 'The user declined the action.'; }
   try {
     const r = await post('/api/tool', { name, args }, chatCtl && chatCtl.signal);
+    if (r.warnings) flashWarnings(r.warnings);
     if (name === 'write_file' || name === 'replace_in_file' || name === 'apply_patch') {
       const before = r.before, after = name === 'write_file' ? args.content : null;
       body.innerHTML = `<pre>${name === 'write_file' ? diffHtml(before ?? '', args.content) : name === 'apply_patch' ? patchHtml(args.patch) : diffHtml(args.old_str, args.new_str)}</pre><div class="bar"><button>${esc(tr('revert'))}</button><span>${before === null ? esc(tr('new_file_tag')) : ''}</span></div>`;
@@ -959,7 +962,7 @@ function loadForm() {
   $('#fLang').value = draft.lang || LANG; $('#fAutosave').checked = !!draft.autosave; $('#fWeb').checked = !!draft.webSearch;
   $('#fPrompt').value = draft.sysPrompt || ''; $('#fVoiceSend').checked = draft.voiceSend !== false; $('#fVoiceSpeak').checked = !!draft.voiceSpeak;
   $('#catBox').hidden = editMode !== 'offline';
-  loadUiForm(); renderLicense();
+  loadUiForm(); renderBuild();
   if (editMode === 'offline') loadCatalog();
 }
 
@@ -1069,52 +1072,21 @@ $('#fTest').onclick = async () => {
   try { const m = await llm([{ role: 'user', content: 'Reply with one word: ok' }], { e: draft[editMode], opts: { maxTokens: 16 } }); el.textContent = tr('test_ok', (m.content || '').slice(0, 40)); }
   catch (er) { el.textContent = '✗ ' + er.message; }
 };
-/* ---- лицензия ---- */
-function licReasonKey(r) { return ['malformed', 'signature', 'expired', 'machine', 'disabled'].includes(r) ? 'lic_r_' + r : 'lic_r_other'; }
-function licDescribe(l) {
-  l = l || (info.license || {});
-  if (!l.enabled || l.state === 'disabled') return tr('lic_off');
-  let s;
-  if (l.state === 'licensed') s = tr('lic_ok', l.plan || '—', l.expires || tr('lic_forever'));
-  else if (l.state === 'trial') s = tr('lic_trial', l.trialDaysLeft);
-  else if (l.state === 'tampered') s = tr('lic_tampered', (l.integrity && l.integrity.files || []).join(', '));
-  else if (l.state === 'expired') s = tr('lic_expired');
-  else s = tr('lic_invalid') + ' ' + tr(licReasonKey(l.reason));
-  if (l.state !== 'tampered' && l.integrity && l.integrity.ok === false) s += ' ' + tr('lic_integ', (l.integrity.files || []).join(', '));
-  return s;
+/* ---- о программе и подлинность сборки ---- */
+function buildLabel(b) {
+  b = b || (info.integrity || {});
+  if (b.state === 'official') return tr('build_official', b.version || '—');
+  if (b.state === 'modified') return tr('build_modified', (b.files || []).join(', '));
+  if (b.state === 'tampered') return tr('build_tampered');
+  return tr('build_unsigned');
 }
-function renderLicense() {
-  const st = $('#licState'); if (!st) return;
-  const l = info.license || {};
-  st.textContent = licDescribe(l);
-  st.style.color = l.state === 'licensed' || l.state === 'trial' ? 'var(--ok)' : l.enabled ? 'var(--err)' : '';
-  const m = $('#licMachine'); if (m) m.value = l.machine || '';
-  $('#licBox').style.display = l.enabled ? '' : 'none';
-  $('#licActivate').disabled = !l.enabled;
-  const canRemove = l.state === 'licensed' || l.state === 'invalid' || l.state === 'tampered' || l.state === 'expired';
-  $('#licRemove').style.display = canRemove ? '' : 'none';
+function renderBuild() {
+  const el = $('#buildState'); if (!el) return;
+  const b = info.integrity || {};
+  el.textContent = buildLabel(b);
+  el.style.color = b.state === 'official' ? 'var(--ok)' : b.state === 'unsigned' ? '' : 'var(--err)';
+  const v = $('#aboutVer'); if (v) v.textContent = tr('about_ver', info.version || '—');
 }
-const licMsg = (t, bad) => { const e = $('#licMsg'); if (e) { e.textContent = t; e.style.color = bad === true ? 'var(--err)' : bad === false ? 'var(--ok)' : ''; } };
-$('#licActivate').onclick = async () => {
-  const token = $('#licToken').value.trim();
-  if (!token) return licMsg(tr('lic_need'), true);
-  licMsg(tr('lic_checking'));
-  try {
-    info.license = await post('/api/license/activate', { token });
-    $('#licToken').value = ''; renderLicense(); licMsg(tr('lic_done'));
-  } catch (e) { info.license = e.license || info.license; renderLicense(); licMsg(e.message, true); }
-};
-$('#licRemove').onclick = async () => {
-  if (!confirm(tr('lic_confirm'))) return;
-  try { info.license = await post('/api/license/remove', {}); renderLicense(); licMsg(tr('lic_removed')); }
-  catch (e) { licMsg(e.message, true); }
-};
-$('#licHelp').onclick = () => licMsg(tr('lic_help_text'));
-$('#licCopy').onclick = async () => {
-  const id = (info.license || {}).machine || '';
-  if (!id) return;
-  try { await navigator.clipboard.writeText(id); toast(tr('lic_copied')); } catch { $('#licMachine').select(); document.execCommand && document.execCommand('copy'); }
-};
 $('#setCancel').onclick = () => { $('#modal').classList.remove('open'); applyTheme(); };
 $('#setSave').onclick = () => {
   readForm(); draft.profile = $('#fProfile').value; draft.autocomplete = $('#fAC').checked; draft.theme = $('#fTheme').value;
@@ -1377,7 +1349,7 @@ $('#vRemove').onclick = async () => { if (!confirm(tr('v_ask_remove'))) return; 
 /* ================= Язык, git, быстрые действия, справка ================= */
 function refreshLang() {
   applyI18n(); $('#langBtn').textContent = LANG.toUpperCase();
-  buildQuick(); updateHeader(); updateStatus(); refreshGit(); try { renderLicense(); } catch {}
+  buildQuick(); updateHeader(); updateStatus(); refreshGit(); try { renderBuild(); } catch {}
 }
 $('#langBtn').onclick = () => { LANG = LANG === 'ru' ? 'en' : 'ru'; cfg.lang = LANG; saveCfg(); refreshLang(); };
 
@@ -1492,12 +1464,8 @@ const ATT_RE = /\n\n(?:Прикреплённые файлы|Attached files):/;
   try { chatHist = JSON.parse(localStorage['lc_chat:' + info.root] || '[]'); } catch { chatHist = []; }
   for (const m of chatHist) { if (m.role === 'user') { if (!isToolRes(m)) addMsg('user', esc(m.content.split(ATT_RE)[0])); } else if (m.role === 'assistant' && visible(m.content)) addMsg('ai', md(visible(m.content))); }
   refreshLang(); renderTabs(); renderTree();
-  const L0 = info.license || {};
-  if (L0.enabled) {
-    if (L0.state === 'trial') addMsg('sys', esc(tr('lic_boot_trial', L0.trialDaysLeft)));
-    else if (L0.state === 'expired' || L0.state === 'invalid') addMsg('sys', esc(tr('lic_boot_expired')));
-    else if (L0.state === 'tampered') addMsg('sys', esc(tr('lic_boot_tampered')));
-  }
+  const B0 = info.integrity || {};
+  if (B0.state === 'modified' || B0.state === 'tampered') addMsg('sys', esc(tr('build_boot_bad', (B0.files || []).join(', '))));
   if (!chatHist.length) addMsg('sys', esc(tr(cfg.mode === 'offline' ? 'welcome_off' : 'welcome_on')));
   if (rules) addMsg('sys', esc(tr('rules_on')));
   await autoPickModel().catch(() => {});
