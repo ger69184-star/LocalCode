@@ -21,7 +21,8 @@ const T = (ru, en) => (SLANG === 'en' ? en : ru);
 const argv = process.argv.slice(2);
 const optVal = (n) => { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] : null; };
 const positional = argv.filter((a, i) => !a.startsWith('--') && argv[i - 1] !== '--port');
-const BASE_PORT = Number(optVal('--port') || process.env.PORT || 3000);
+const rawPort = Number(optVal('--port') || process.env.PORT || 3000);
+const BASE_PORT = Number.isInteger(rawPort) && rawPort > 0 && rawPort < 65536 ? rawPort : 3000;   // --port abc не должен ронять запуск
 let PORT = BASE_PORT;
 const HOST = '127.0.0.1';
 const TOKEN = crypto.randomBytes(16).toString('hex');
@@ -201,10 +202,14 @@ function histList(filterPath, limit = 50) {
   let names = [];
   try { names = fs.readdirSync(HIST_DIR).filter(f => f.endsWith('.json')).sort().reverse(); } catch { return []; }
   const out = [];
+  let readBytes = 0;
   for (const n of names) {
     if (out.length >= Math.min(200, Math.max(1, Number(limit) || 50))) break;
     try {
-      const j = JSON.parse(fs.readFileSync(path.join(HIST_DIR, n), 'utf8'));
+      const file = path.join(HIST_DIR, n), st = fs.statSync(file);
+      if (readBytes + st.size > 24 * 1024 * 1024) break;      // предохранитель: не читаем десятки мегабайт ради списка
+      readBytes += st.size;
+      const j = JSON.parse(fs.readFileSync(file, 'utf8'));
       if (!j || !j.id) continue;
       if (filterPath && j.path !== filterPath) continue;
       out.push({ id: j.id, path: j.path, ts: j.ts, created: j.before === null, size: typeof j.before === 'string' ? j.before.length : 0 });
@@ -389,6 +394,7 @@ function parseDdg(html) {
 }
 async function webSearch(q) {
   if (!q || !String(q).trim()) throw new Error(T('Пустой запрос', 'Empty query'));
+  if (String(q).length > 500) throw new Error(T('Слишком длинный запрос (максимум 500 символов)', 'Query is too long (500 characters max)'));
   const r = await fetch('https://html.duckduckgo.com/html/?q=' + encodeURIComponent(q), { headers: { 'User-Agent': 'Mozilla/5.0 (LocalCode)', 'Accept-Language': 'ru,en;q=0.8' }, signal: AbortSignal.timeout(15000) });
   if (!r.ok) throw new Error('HTTP ' + r.status);
   const res = parseDdg((await readCapped(r, 2 * 1024 * 1024)).toString('utf8'));
@@ -396,6 +402,31 @@ async function webSearch(q) {
 }
 const PRIVATE_ERR = () => new Error(T('Адреса внутри вашего компьютера и сети закрыты', 'Local and private network addresses are blocked'));
 const stripHost = (h) => String(h || '').trim().replace(/\.$/, '').replace(/^\[|\]$/g, '').toLowerCase();
+/* Разбирает IPv6 в 8 групп по 16 бит (в том числе :: и встроенный IPv4 в конце).
+   Возвращает null, если адрес разобрать не удалось. */
+function ipv6Groups(ip) {
+  let s = stripHost(ip).replace(/%.*$/, '');
+  const quad = s.match(/(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (quad) {
+    const n = quad.slice(1).map(Number);
+    if (n.some(x => x > 255)) return null;
+    s = s.slice(0, quad.index) + ((n[0] << 8) | n[1]).toString(16) + ':' + ((n[2] << 8) | n[3]).toString(16);
+  }
+  const halves = s.split('::');
+  if (halves.length > 2) return null;
+  const parse = (x) => (x ? x.split(':') : []);
+  let left = parse(halves[0]), right = parse(halves[1] === undefined ? '' : halves[1]);
+  if (!s.includes('::')) {
+    if (left.length !== 8) return null;
+    right = [];
+  } else {
+    if (left.length + right.length > 7) return null;
+    left = [...left, ...Array(8 - left.length - right.length).fill('0'), ...right];
+  }
+  if (left.length !== 8 || !left.every(g => /^[0-9a-f]{1,4}$/i.test(g))) return null;
+  return left.map(g => parseInt(g, 16));
+}
+const ipv4Of = (hi, lo) => `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`;
 function isPrivateIp(ip) {
   const s = stripHost(ip).replace(/%.*$/, '');
   if (net.isIPv4(s)) {
@@ -410,12 +441,21 @@ function isPrivateIp(ip) {
     return o[0] >= 224;                                                  // multicast и зарезервированные
   }
   if (net.isIPv6(s)) {
-    if (s === '::' || s === '::1') return true;
-    const m = s.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/); if (m) return isPrivateIp(m[1]);
-    const first = parseInt((s.split(':')[0] || '0') || '0', 16) || 0;
-    if ((first & 0xfe00) === 0xfc00) return true;                        // fc00::/7 (уникальные локальные)
-    if ((first & 0xffc0) === 0xfe80) return true;                        // fe80::/10 (link-local)
-    if ((first & 0xff00) === 0xff00) return true;                        // multicast
+    const g = ipv6Groups(s);
+    if (!g) return true;                                                 // не разобрали — считаем закрытым (безопаснее)
+    const z = (a, b) => g.slice(a, b).every(x => x === 0);
+    if (z(0, 8)) return true;                                            // ::
+    if (z(0, 7) && g[7] === 1) return true;                              // ::1
+    // IPv4 внутри IPv6: ::ffff:a.b.c.d, устаревший ::a.b.c.d, NAT64 64:ff9b::/96
+    if ((z(0, 5) && (g[5] === 0xffff || g[5] === 0))) return isPrivateIp(ipv4Of(g[6], g[7]));
+    if (g[0] === 0x64 && g[1] === 0xff9b && z(2, 6)) return isPrivateIp(ipv4Of(g[6], g[7]));
+    // 6to4 (2002::/16) и Teredo (2001::/32) — туннели с встроенным IPv4, для загрузки страниц не нужны
+    if (g[0] === 0x2002) return isPrivateIp(ipv4Of(g[1], g[2]));
+    if (g[0] === 0x2001 && g[1] === 0) return true;
+    if ((g[0] & 0xfe00) === 0xfc00) return true;                         // fc00::/7 (уникальные локальные)
+    if ((g[0] & 0xffc0) === 0xfe80) return true;                         // fe80::/10 (link-local)
+    if ((g[0] & 0xffc0) === 0xfec0) return true;                         // fec0::/10 (устаревшие site-local)
+    if ((g[0] & 0xff00) === 0xff00) return true;                         // multicast
     return false;
   }
   return false;
@@ -441,8 +481,29 @@ async function assertPublicUrl(u) {
 }
 /* Адрес сервера модели задаёт сам пользователь (в том числе Ollama на этом ПК), поэтому LAN разрешён,
    но облачные метаданные и link-local закрыты — иначе через настройки можно было бы увести токен облака. */
-const isMetadataTarget = (host) => /^(169\.254\.169\.254|100\.100\.100\.200|metadata|metadata\.google\.internal|instance-data)$/i.test(host)
-  || /^169\.254\./.test(host) || /^fe80:/i.test(host) || /^fd00:ec2/i.test(host);
+const META_NAMES = /^(metadata|metadata\.google\.internal|instance-data)$/i;
+function isMetadataTarget(host) {
+  const h = stripHost(host);
+  if (!h) return true;
+  if (META_NAMES.test(h)) return true;
+  if (net.isIPv4(h)) return /^169\.254\./.test(h) || h === '100.100.100.200' || h === '0.0.0.0';
+  if (/^\d+$/.test(h) || /^0x[0-9a-f]+$/i.test(h)) {            // 2852039166 и т. п.
+    const n = Number(h);
+    if (Number.isSafeInteger(n) && n >= 0 && n <= 0xffffffff) {
+      const v4 = `${Math.floor(n / 2 ** 24)}.${Math.floor(n / 2 ** 16) % 256}.${Math.floor(n / 256) % 256}.${n % 256}`;
+      return /^169\.254\./.test(v4) || v4 === '100.100.100.200';
+    }
+  }
+  if (net.isIPv6(h)) {
+    const g = ipv6Groups(h);
+    if (!g) return true;
+    if ((g[0] & 0xffc0) === 0xfe80) return true;                 // fe80::/10
+    if (g[0] === 0xfd00 && g[1] === 0xec2) return true;          // fd00:ec2::/32 (AWS)
+    if (g.slice(0, 5).every(x => x === 0) && (g[5] === 0xffff || g[5] === 0)) return isMetadataTarget(ipv4Of(g[6], g[7]));
+    if (g[0] === 0x64 && g[1] === 0xff9b && g.slice(2, 6).every(x => x === 0)) return isMetadataTarget(ipv4Of(g[6], g[7]));
+  }
+  return false;
+}
 async function assertProviderUrl(cfg) {
   const base = baseOf(cfg || {});
   let u; try { u = new URL(base); } catch { throw new Error(T('Неверный Base URL в настройках', 'Invalid Base URL in settings')); }
@@ -546,13 +607,16 @@ function findPaths(query, where) {
   const run = (roots) => {
     const out = [], skip = new Set(['node_modules', '.git', 'appdata', '$recycle.bin', 'windows', 'program files', 'program files (x86)']);
     let seen = 0;
+    /* Обход синхронный и идёт в главном потоке: ограничиваем время, чтобы сервер не «замирал» на большом диске. */
+    const until = Date.now() + 1500;
     const walk = (dir, depth) => {
-      if (depth > 4 || seen > 30000 || out.length > 60) return;
+      if (depth > 4 || seen > 30000 || out.length > 60 || Date.now() > until) return;
       let items; try { items = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
       for (const e of items) {
+        if (Date.now() > until) return;
         seen++; const n = norm(e.name), full = path.join(dir, e.name);
         if (n.includes(q)) out.push({ path: full, dir: e.isDirectory(), score: n === q ? 0 : n.startsWith(q) ? 1 : 2, len: n.length });
-        if (e.isDirectory() && !skip.has(e.name.toLowerCase()) && !e.name.startsWith('.')) walk(full, depth + 1);
+        if (e.isDirectory() && !e.isSymbolicLink() && !skip.has(e.name.toLowerCase()) && !e.name.startsWith('.')) walk(full, depth + 1);
       }
     };
     for (const r of roots) if (fs.existsSync(r)) walk(r, 0);
@@ -590,7 +654,9 @@ async function bluetooth(action) {
 }
 function deleteToTrash(full) {
   const home = os.homedir();
-  if (full === ROOT || full === home || full === deskDir() || path.dirname(full) === path.dirname(home)) throw new Error(T('Эту папку удалять нельзя', 'This folder cannot be deleted'));
+  const same = (a, b) => process.platform === 'win32' ? String(a).toLowerCase() === String(b).toLowerCase() : a === b;
+  if (same(full, ROOT) || same(full, home) || same(full, deskDir()) || same(path.dirname(full), path.dirname(home)))
+    throw new Error(T('Эту папку удалять нельзя', 'This folder cannot be deleted'));
   const st = fs.statSync(full);
   if (process.platform === 'win32') {
     const q = full.replace(/'/g, "''");
@@ -743,6 +809,7 @@ function readZip(buf) {
     const name = buf.slice(p + 46, p + 46 + nl).toString('utf8');
     if (lo + 30 > buf.length) throw new Error(T('Архив повреждён', 'The archive is damaged'));
     const start = lo + 30 + buf.readUInt16LE(lo + 26) + buf.readUInt16LE(lo + 28);
+    if (start < 0 || start + csize > buf.length) throw new Error(T('Архив повреждён', 'The archive is damaged'));
     const raw = buf.slice(start, start + csize);
     let data;
     if (method === 0) data = raw;
@@ -842,7 +909,8 @@ function readRules() {
   for (const n of ['.localcode/rules.md', 'AGENTS.md', '.cursorrules', 'CLAUDE.md']) {
     const f = path.join(ROOT, n);
     try {
-      if (!fs.lstatSync(f).isFile()) continue;        // символическую ссылку не читаем
+      const st = fs.lstatSync(f);
+      if (!st.isFile() || st.size > 64 * 1024) continue;        // символическую ссылку и огромный файл не читаем
       if (!realInside(f, ROOT)) continue;
       return fs.readFileSync(f, 'utf8').slice(0, 6000);
     } catch {}
@@ -922,7 +990,8 @@ class HttpError extends Error { constructor(msg, status, retryAfter) { super(msg
 const keyState = new Map();   // ключ -> { uses, fails, until, reason }
 const keyIdx = new Map();     // провайдер -> индекс текущего ключа (держимся за рабочий, пока он не откажет)
 const mask = (k) => k.length > 10 ? k.slice(0, 4) + '…' + k.slice(-4) : '…';
-const keyList = (cfg) => { const l = (Array.isArray(cfg.apiKeys) ? cfg.apiKeys : []).map(k => String(k).trim()).filter(Boolean); if (cfg.apiKey && String(cfg.apiKey).trim()) l.unshift(String(cfg.apiKey).trim()); return [...new Set(l)]; };
+/* Не больше 20 ключей на провайдера: защита от случайной вставки огромного списка (проверка ключей идёт по очереди). */
+const keyList = (cfg) => { const l = (Array.isArray(cfg.apiKeys) ? cfg.apiKeys : []).map(k => String(k).trim()).filter(Boolean); if (cfg.apiKey && String(cfg.apiKey).trim()) l.unshift(String(cfg.apiKey).trim()); return [...new Set(l)].slice(0, 20); };
 const stOf = (k) => { if (!keyState.has(k)) keyState.set(k, { uses: 0, fails: 0, until: 0, reason: '' }); return keyState.get(k); };
 function classifyKeyError(e) {
   const s = e && e.status, msg = String((e && e.message) || '');
@@ -1115,8 +1184,11 @@ async function complete(b) {
   const messages = [
     { role: 'system', content: 'You are a code autocompletion engine. Output ONLY the text to insert at the cursor position (up to 3 lines). No explanations, no markdown.' },
     { role: 'user', content: `File: ${p}\n<before>\n${prefix}\n</before>\n<after>\n${suffix}\n</after>\nContinue from the cursor.` }];
-  const msg = await withKeys(cfg, () => {}, (c) => streamer(c)(c, messages, null, () => {}, undefined, { maxTokens: 100, temperature: 0.1 }));
-  return stripFence(msg.content);
+  const ac = new AbortController(), stop = setTimeout(() => ac.abort(), 30000);
+  try {
+    const msg = await withKeys(cfg, () => {}, (c) => streamer(c)(c, messages, null, () => {}, ac.signal, { maxTokens: 100, temperature: 0.1 }));
+    return stripFence(msg.content);
+  } finally { clearTimeout(stop); }
 }
 const listModels = (cfg) => withKeys(cfg, () => {}, listModelsOnce);
 async function listModelsOnce(cfg) {
@@ -1247,7 +1319,7 @@ function findFile(dir, names) {
 const sttBin = () => (process.env.WHISPER_CLI && fs.existsSync(process.env.WHISPER_CLI) ? process.env.WHISPER_CLI : (findFile(path.join(STT_DIR, 'bin'), ['whisper-cli.exe']) || findFile(path.join(STT_DIR, 'bin'), ['whisper-cli'])));
 const sttModelFile = (size) => { const m = STT_MODELS[size] || STT_MODELS.base; for (const n of [m[0], m[1]]) { const f = path.join(STT_DIR, n); try { if (fs.statSync(f).size > 1e6) return f; } catch {} } return null; };
 const sttStatus = () => ({ canInstall: process.platform === 'win32', bin: !!sttBin(), models: Object.fromEntries(Object.entries(STT_MODELS).map(([k, v]) => [k, { ready: !!sttModelFile(k), mb: v[2] }])) });
-async function downloadTo(url, dest, onPct, signal) {
+async function downloadTo(url, dest, onPct, signal, maxBytes = 600 * 1024 * 1024) {
   await assertPublicUrl(new URL(url));
   const ac = new AbortController(); const onAbort = () => ac.abort(); if (signal) { if (signal.aborted) ac.abort(); else signal.addEventListener('abort', onAbort); }
   let t = setTimeout(() => ac.abort(), 30000), tmp = dest + '.part', out;
@@ -1257,8 +1329,10 @@ async function downloadTo(url, dest, onPct, signal) {
     const total = +r.headers.get('content-length') || 0; let got = 0; out = fs.createWriteStream(tmp);
     for await (const chunk of r.body) {
       clearTimeout(t); t = setTimeout(() => ac.abort(), 30000);
+      got += chunk.length;
+      if (got > maxBytes) throw new Error(T('Файл слишком большой для загрузки', 'The download is too large'));
       if (!out.write(chunk)) await new Promise(res => out.once('drain', res));
-      got += chunk.length; onPct && onPct(total ? Math.round(100 * got / total) : null);
+      onPct && onPct(total ? Math.round(100 * got / total) : null);
     }
     await new Promise((res, rej) => out.end(e => e ? rej(e) : res()));
     fs.renameSync(tmp, dest);
@@ -1313,6 +1387,7 @@ function rawBody(req, limit = 40e6) {
     req.on('end', () => { if (done) return; if (tooBig) return fail(new HttpError(T('Слишком большая запись', 'Recording too large'), 413)); done = true; resolve(Buffer.concat(chunks)); });
     req.on('error', fail);
     req.on('aborted', () => fail(new HttpError(T('Запрос прерван', 'Request aborted'), 400)));
+    req.on('close', () => { if (!req.complete) fail(new HttpError(T('Запрос прерван', 'Request aborted'), 400)); });
   });
 }
 async function handleSttInstall(b, res) {
@@ -1426,7 +1501,7 @@ function sendStatic(req, res, f) {
       if (/\bbr\b/.test(ae)) { e.br = e.br || zlib.brotliCompressSync(e.raw); body = e.br; headers['Content-Encoding'] = 'br'; }
       else if (/\bgzip\b/.test(ae)) { e.gzip = e.gzip || zlib.gzipSync(e.raw, { level: 9 }); body = e.gzip; headers['Content-Encoding'] = 'gzip'; }
     } catch {}
-    if (headers['Content-Encoding']) headers.Vary = 'Accept-Encoding';
+    headers.Vary = 'Accept-Encoding';                 // одинаковый ETag у сжатого и несжатого варианта
   }
   headers['Content-Length'] = body.length;
   res.writeHead(200, headers);
@@ -1446,7 +1521,7 @@ const SEC_HEADERS = {
 };
 const CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'";
 const MAX_JSON_BODY = 30e6;
-const body = (req) => new Promise((resolve, reject) => {
+const body = (req, limit = MAX_JSON_BODY) => new Promise((resolve, reject) => {
   if (!/^application\/json\b/i.test(String(req.headers['content-type'] || '')))
     return reject(new HttpError(T('Нужен заголовок Content-Type: application/json', 'Content-Type: application/json is required'), 415));
   const chunks = []; let size = 0, tooBig = false, done = false;
@@ -1454,7 +1529,7 @@ const body = (req) => new Promise((resolve, reject) => {
   req.on('data', c => {
     if (tooBig) return;
     size += c.length;
-    if (size > MAX_JSON_BODY) { tooBig = true; chunks.length = 0; return; }   // не копим тело, но и не рвём ответ: клиент должен увидеть 413
+    if (size > limit) { tooBig = true; chunks.length = 0; return; }   // не копим тело, но и не рвём ответ: клиент должен увидеть 413
     chunks.push(c);
   });
   req.on('end', () => {
@@ -1546,10 +1621,11 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/export') {
       if (!only('GET')) return;
       const zip = projectZipBytes();
-      const name = (path.basename(ROOT) || 'project').replace(/[^\w.-]+/g, '_') + '.zip';
+      const base = path.basename(ROOT) || 'project';
+      const name = base.replace(/[^\w.-]+/g, '_') + '.zip';
       res.writeHead(200, {
         'Content-Type': 'application/zip',
-        'Content-Disposition': `attachment; filename="${name}"; filename*=UTF-8''${encodeURIComponent(name)}`,
+        'Content-Disposition': `attachment; filename="${name}"; filename*=UTF-8''${encodeURIComponent(base + '.zip')}`,
         'Content-Length': zip.length,
       });
       return res.end(zip);
@@ -1557,8 +1633,10 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/import') {
       if (!only('POST')) return;
       const b = await body(req, 36e6);                       // base64 от 25 МБ — это ~34 МБ
-      if (!str(b.data, 34e6)) return json(400, { error: T('Архив не передан или слишком большой (до 25 МБ)', 'The archive is missing or too large (up to 25 MB)') });
-      let buf; try { buf = Buffer.from(String(b.data), 'base64'); } catch { return json(400, { error: T('Повреждённые данные архива', 'Damaged archive data') }); }
+      if (!str(b.data, 36e6)) return json(400, { error: T('Архив не передан или слишком большой (до 25 МБ)', 'The archive is missing or too large (up to 25 MB)') });
+      const b64 = String(b.data).replace(/^data:[^,]*,/, '').replace(/\s+/g, '');
+      if (!b64 || b64.length % 4 === 1 || /[^A-Za-z0-9+/=]/.test(b64)) return json(400, { error: T('Повреждённые данные архива', 'Damaged archive data') });
+      let buf; try { buf = Buffer.from(b64, 'base64'); } catch { return json(400, { error: T('Повреждённые данные архива', 'Damaged archive data') }); }
       const r = importZip(buf);
       return json(200, r);
     }

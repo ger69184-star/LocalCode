@@ -8,10 +8,11 @@ const S = require('../server.js');
 test('isPrivateIp: локальные, link-local, CGNAT, multicast и IPv6', () => {
   for (const ip of ['127.0.0.1', '10.1.2.3', '192.168.0.1', '172.16.0.1', '172.31.255.255',
     '169.254.169.254', '0.0.0.0', '100.64.0.1', '192.0.0.1', '198.18.0.1', '224.0.0.1', '255.255.255.255',
-    '::1', '::', '::ffff:127.0.0.1', 'fc00::1', 'fd12:3456::1', 'fe80::1', 'ff02::1']) {
+    '::1', '::', '::ffff:127.0.0.1', 'fc00::1', 'fd12:3456::1', 'fe80::1', 'ff02::1',
+    '::ffff:7f00:1', '::ffff:a9fe:a9fe', '64:ff9b::7f00:1', '2002:7f00:1::']) {
     assert.equal(S.isPrivateIp(ip), true, ip);
   }
-  for (const ip of ['8.8.8.8', '1.1.1.1', '172.32.0.1', '2001:4860:4860::8888']) assert.equal(S.isPrivateIp(ip), false, ip);
+  for (const ip of ['8.8.8.8', '1.1.1.1', '172.32.0.1', '2001:4860:4860::8888', '::ffff:808:808', '2001:db8::1']) assert.equal(S.isPrivateIp(ip), false, ip);
 });
 
 test('isPrivateHost: имена, десятичные и hex-адреса', () => {
@@ -27,12 +28,16 @@ test('assertPublicUrl: запрещает локальные адреса и н�
   await assert.rejects(() => S.assertPublicUrl(new URL('http://2130706433/')), /закрыты|blocked/);
   await assert.rejects(() => S.assertPublicUrl(new URL('http://169.254.169.254/latest/meta-data/')), /закрыты|blocked/);
   await assert.rejects(() => S.assertPublicUrl(new URL('file:///etc/passwd')), /http/);
+  /* URL нормализует ::ffff:127.0.0.1 в ::ffff:7f00:1 — такой обход тоже должен закрываться. */
+  await assert.rejects(() => S.assertPublicUrl(new URL('http://[::ffff:127.0.0.1]:11434/')), /закрыты|blocked/);
+  await assert.rejects(() => S.assertPublicUrl(new URL('http://[64:ff9b::a9fe:a9fe]/')), /закрыты|blocked/);
   await assert.doesNotReject(() => S.assertPublicUrl(new URL('https://1.1.1.1/')));
 });
 
 test('assertProviderUrl: метаданные облака закрыты, локальная Ollama разрешена', async () => {
   await assert.rejects(() => S.assertProviderUrl({ baseUrl: 'file:///etc/passwd' }), /http/);
   await assert.rejects(() => S.assertProviderUrl({ baseUrl: 'http://169.254.169.254/v1' }), /не разрешён|not allowed/);
+  await assert.rejects(() => S.assertProviderUrl({ baseUrl: 'http://[::ffff:a9fe:a9fe]/v1' }), /не разрешён|not allowed/);
   await assert.rejects(() => S.assertProviderUrl({ baseUrl: 'http://user:pass@example.com/v1' }), /логин|username/i);
   await assert.doesNotReject(() => S.assertProviderUrl({ baseUrl: 'http://127.0.0.1:11434/v1' }));
   await assert.doesNotReject(() => S.assertProviderUrl({ baseUrl: 'https://api.deepseek.com/v1' }));

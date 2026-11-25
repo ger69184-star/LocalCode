@@ -63,13 +63,21 @@ test('палитра команд и оформление не падают', ()
   ev('applyUi({ ...UI_DEF, chatSide: "left", syntax: "monokai", quickList: "A | b" })');
   assert.equal(ev('uiCfg().asMs'), 1000);
 });
+test('битые настройки из localStorage нормализуются', () => {
+  const c = ev("normalizeCfg({ mode: 'xxx', profile: 'nope', offline: null, online: { preset: 'nope', apiKeys: [' a ', 5, ''] }, theme: 'neon', lang: 'de' })");
+  assert.equal(c.mode, 'offline'); assert.equal(c.profile, 'normal'); assert.equal(c.theme, 'dark'); assert.equal(c.lang, 'ru');
+  assert.equal(c.offline.baseUrl, ev('PRESETS.offline.ollama.baseUrl'));
+  assert.equal(c.offline.model, ev('PRESETS.offline.ollama.model'));
+  assert.equal(c.online.preset, 'deepseek'); assert.deepEqual([...c.online.apiKeys], ['a']);
+  assert.equal(ev('normalizeCfg(null).mode'), 'offline');
+});
 test('подсказки провайдеров не пустые', () => { assert.match(ev("presetNote('online','groq')"), /Groq|бесплат/i); });
 test('дымовой прогон: функции интерфейса вызываются без ошибок', () => {
   ev("cfg = { mode: 'offline', profile: 'normal', theme: 'dark', lang: 'ru', offline: mkEp('offline', 'ollama'), online: mkEp('online', 'deepseek') }");
   ev("chatHist = [{ role: 'user', content: 'привет' }, { role: 'assistant', content: 'Здравствуйте' }]");
   const calls = ["buildQuick()", "renderQo()", "exportChat()", "copyLast()", "showStat(2.5, 400)", "beep()", "keyNotice({ from: 1, index: 2, total: 3, reason: 'limit' })",
     "choosePath('x', [{ path: 'C:/a' }], 'open')", "hlMatch('abc', 'b', false)", "patchHtml('+a\\n-b')", "askUser({ question: 'q', options: ['a'] })", "scheduleRender()", "renderTreeSoon()",
-    "applyUi(UI_DEF)", "readUiForm()", "keysFromForm()", "updateStatus()", "textToolsPrompt()", "systemPrompt(false, true)", "activeTools()", "withCtx('')", "runCmdFor('a.py', true)", "downloadText('a.txt', 'x')"];
+    "applyUi(UI_DEF)", "readUiForm()", "keysFromForm()", "updateStatus()", "textToolsPrompt()", "systemPrompt(false, true)", "activeTools()", "withCtx('')", "runCmdFor('a.py', true)", "downloadText('a.txt', 'x')", "syncActiveNode()"];
   for (const c of calls) { try { ev(c); } catch (e) { assert.fail(c + ' -> ' + e.message); } }
 });
 test('новые помощники: размер, время истории, окружение, клавиши', () => {

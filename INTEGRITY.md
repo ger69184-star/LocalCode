@@ -14,7 +14,7 @@
 ## Как устроено
 
 1. Владелец проекта подписывает список хэшей файлов закрытым ключом Ed25519:
-   `npm run sign -- sign --key ./integrity-keys/private.pem`
+   `npm run sign -- sign` (ключ по умолчанию — `./integrity-keys/private.pem`)
    → создаётся `integrity.json`.
 2. Открытый ключ лежит рядом: `integrity-pub.pem`.
 3. При запуске (и в «Настройки → О программе») приложение сверяет файлы:
@@ -36,8 +36,9 @@
 # один раз: создать пару ключей (закрытый — только у владельца проекта)
 node tools/integrity-cli.js keygen --out ./integrity-keys --install
 
-# после любых правок в файлах из манифеста
-npm run sign -- sign --key ./integrity-keys/private.pem
+# после любых правок в файлах из манифеста (ключ берётся из ./integrity-keys/private.pem)
+npm run sign -- sign
+# если ключ лежит в другом месте: npm run sign -- sign --key путь/private.pem
 
 # посмотреть состояние
 npm run sign -- status

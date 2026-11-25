@@ -104,6 +104,16 @@ test('zip: распаковка не выходит за пределы папк
   assert.equal(fs.existsSync(path.join(dir, '..', 'evil.txt')), false);
   fs.rmSync(dir, { recursive: true, force: true });
 });
+test('readZip: битые границы сжатых данных отклоняются', () => {
+  const zip = S.zipStore([{ name: 'a.txt', data: Buffer.from('hello'), mtime: new Date() }]);
+  let eocd = -1;
+  for (let i = zip.length - 22; i >= 0; i--) if (zip.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
+  assert.ok(eocd > 0);
+  const cdOff = zip.readUInt32LE(eocd + 16);
+  const bad = Buffer.from(zip); bad.writeUInt32LE(100000, cdOff + 20);      // csize указывает за пределы файла
+  assert.throws(() => S.readZip(bad), /повреждён|damaged/i);
+  assert.deepEqual(S.readZip(zip).map(f => f.name), ['a.txt']);
+});
 test('replaceAllInProject: считает и заменяет, пустое совпадение отклоняется', () => {
   w('rep1.txt', 'beta beta'); w('rep2.txt', 'gamma');
   const dry = S.replaceAllInProject('beta', 'B', { dry: true });

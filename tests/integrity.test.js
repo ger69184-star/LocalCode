@@ -52,6 +52,14 @@ test('манифест, подписанный чужим ключом, не п�
   assert.equal(I.verifyManifest(dir, publicKey, man).reason, 'signature');
 });
 
+test('манифест с путями за пределы папки приложения отклоняется', () => {
+  const dir = app({ 'server.js': 'a\n' });
+  const files = { '../evil.txt': I.sha256('x') };
+  const body = JSON.stringify({ v: 1, alg: 'ed25519', app: 'LocalCode', version: '1', files });
+  const sig = crypto.sign(null, Buffer.from(body), privateKey).toString('base64url');
+  const man = { v: 1, alg: 'ed25519', app: 'LocalCode', version: '1', files, sig };
+  assert.equal(I.verifyManifest(dir, publicKey, man).reason, 'malformed');
+});
 test('состояние: без манифеста и без ключа — unsigned, а не ошибка', () => {
   const dir = app({ 'server.js': 'a\n' });
   assert.equal(I.status(dir, { publicKey }).state, 'unsigned');

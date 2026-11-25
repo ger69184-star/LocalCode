@@ -25,8 +25,10 @@ const appDir = path.resolve(opt('app') || path.join(__dirname, '..'));
 const say = (...a) => console.log(...a);
 const die = (m) => { console.error('Ошибка: ' + m); process.exit(1); };
 const keyFrom = (v) => {
-  const f = v || process.env.LOCALCODE_SIGN_KEY;
-  if (!f || f === true) die('укажите --key <private.pem>');
+  /* По умолчанию — ключ рядом с проектом: `npm run sign -- sign` работает без аргументов. */
+  const f = v === true ? null : v || process.env.LOCALCODE_SIGN_KEY || path.join(appDir, 'integrity-keys', 'private.pem');
+  if (!f) die('укажите --key <private.pem>');
+  if (!fs.existsSync(f)) die('не найден закрытый ключ: ' + f + ' — укажите --key <private.pem> или создайте пару: keygen');
   try { return crypto.createPrivateKey(fs.readFileSync(f)); } catch (e) { die('не удалось прочитать закрытый ключ: ' + e.message); }
 };
 const version = () => { try { return JSON.parse(fs.readFileSync(path.join(appDir, 'package.json'), 'utf8')).version || ''; } catch { return ''; } };
@@ -75,7 +77,7 @@ switch (cmd) {
     say(`LocalCode integrity tool (ключи активации не используются)
 
   keygen  [--out DIR] [--install] [--force]   создать пару ключей для подписи сборок
-  sign    --key FILE                           подписать integrity.json (официальная сборка)
+  sign    [--key FILE]                         подписать integrity.json (по умолчанию ./integrity-keys/private.pem)
   status                                       показать состояние подлинности
   scan    --file FILE                          проверить файл на опасные конструкции
 

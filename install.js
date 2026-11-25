@@ -46,6 +46,7 @@ async function download(url, dest) {
   const ac = new AbortController();
   let timer = setTimeout(() => ac.abort(), 60000);          // нет данных минуту — прекращаем, а не висим вечно
   const out = fs.createWriteStream(dest);
+  out.on('error', () => { try { ac.abort(); } catch {} });
   try {
     const r = await fetch(url, { signal: ac.signal }); if (!r.ok) throw new Error('HTTP ' + r.status);
     if (!/^https:/.test(r.url)) throw new Error('Загрузка перенаправлена на небезопасный адрес');
@@ -57,6 +58,7 @@ async function download(url, dest) {
       if (total && Date.now() - last > 500) { last = Date.now(); process.stdout.write(`\r  ${(got / 2 ** 20).toFixed(0)} / ${(total / 2 ** 20).toFixed(0)} МБ`); }
     }
     await new Promise(res => out.end(res));
+    if (out.errored) throw out.errored;
     say('');
   } catch (e) {
     try { out.destroy(); fs.unlinkSync(dest); } catch {}
@@ -108,7 +110,7 @@ async function main() {
       const gguf = val('--gguf');
       if (gguf) {
         const mf = path.join(os.tmpdir(), 'Modelfile.gguf');
-        fs.writeFileSync(mf, `FROM ${path.resolve(gguf)}\nTEMPLATE """{{- if .System }}<|im_start|>system\n{{ .System }}<|im_end|>\n{{ end }}<|im_start|>user\n{{ .Prompt }}<|im_end|>\n<|im_start|>assistant\n"""\nPARAMETER stop "<|im_end|>"\n`);
+        if (!DRY) fs.writeFileSync(mf, `FROM "${path.resolve(gguf).replace(/"/g, '')}"\nTEMPLATE """{{- if .System }}<|im_start|>system\n{{ .System }}<|im_end|>\n{{ end }}<|im_start|>user\n{{ .Prompt }}<|im_end|>\n<|im_start|>assistant\n"""\nPARAMETER stop "<|im_end|>"\n`);
         base = 'localcode-gguf-base'; ok = run(bin, ['create', base, '-f', mf]).status === 0;
       } else {
         ok = run(bin, ['pull', base]).status === 0;
@@ -126,7 +128,8 @@ async function main() {
 
   step(online ? '1/1  Настройка и ярлыки' : '4/4  Ярлыки запуска и настройки');
   if (!DRY) {
-    const dir = path.join(os.homedir(), '.localcode'); fs.mkdirSync(dir, { recursive: true });
+    const dir = process.env.LOCALCODE_CONFIG_DIR ? path.resolve(process.env.LOCALCODE_CONFIG_DIR) : path.join(os.homedir(), '.localcode');
+    fs.mkdirSync(dir, { recursive: true });
     const f = path.join(dir, 'config.json'); let c = {}; try { c = JSON.parse(fs.readFileSync(f, 'utf8')); } catch {}
     fs.writeFileSync(f, JSON.stringify({ ...c, defaults }, null, 2));
     writeLaunchers(bin, key);

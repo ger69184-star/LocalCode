@@ -65,13 +65,42 @@ const PROFILES = {
   strong: { ctxChars: 40000, hist: 30, acDelay: 400, numCtx: 16384 },
 };
 const mkEp = (mode, preset) => { const p = PRESETS[mode][preset]; return { preset, baseUrl: p.baseUrl, model: p.model, kind: p.kind, authPrefix: p.authPrefix, useTools: p.tools, apiKey: '', apiKeys: [] }; };
+/* localStorage мог остаться от старой версии или быть испорченным: приводим настройки к рабочему виду,
+   иначе обращение к cfg.offline.baseUrl на пустом объекте ломает весь интерфейс. */
+function normalizeCfg(c) {
+  const o = (c && typeof c === 'object' && !Array.isArray(c)) ? c : {};
+  o.mode = o.mode === 'online' ? 'online' : 'offline';
+  if (!PROFILES[o.profile]) o.profile = 'normal';
+  o.theme = ['dark', 'light', 'auto'].includes(o.theme) ? o.theme : 'dark';
+  o.lang = o.lang === 'en' ? 'en' : 'ru';
+  for (const m of ['offline', 'online']) {
+    const def = mkEp(m, m === 'offline' ? 'ollama' : 'deepseek');
+    const e = (o[m] && typeof o[m] === 'object' && !Array.isArray(o[m])) ? o[m] : {};
+    const preset = PRESETS[m][e.preset] ? e.preset : def.preset;
+    const p = PRESETS[m][preset];
+    o[m] = {
+      ...def, ...e, preset,
+      baseUrl: typeof e.baseUrl === 'string' ? e.baseUrl : p.baseUrl,
+      model: typeof e.model === 'string' ? e.model : p.model,
+      kind: e.kind === 'anthropic' ? 'anthropic' : 'openai',
+      authPrefix: typeof e.authPrefix === 'string' && e.authPrefix ? e.authPrefix : 'Bearer',
+      useTools: e.useTools === undefined ? !!p.tools : !!e.useTools,
+      apiKey: typeof e.apiKey === 'string' ? e.apiKey : '',
+      apiKeys: Array.isArray(e.apiKeys) ? e.apiKeys.filter(k => typeof k === 'string' && k.trim()).map(k => k.trim()).slice(0, 20) : [],
+    };
+  }
+  if (o.ui && (typeof o.ui !== 'object' || Array.isArray(o.ui))) delete o.ui;
+  return o;
+}
 let cfg = JSON.parse(localStorage.lc_cfg2 || 'null');
+if (cfg) cfg = normalizeCfg(cfg);
 const saveCfg = () => localStorage.lc_cfg2 = JSON.stringify(cfg);
 function initCfg(d) {
   if (cfg) return;
   cfg = { mode: d.mode || 'offline', profile: d.profile || 'normal', autocomplete: !!d.autocomplete, theme: 'dark', lang: LANG, autosave: false, offline: mkEp('offline', 'ollama'), online: mkEp('online', 'deepseek') };
   if (d.model) cfg.offline.model = d.model;
   if (d.useTools != null) cfg.offline.useTools = d.useTools;
+  cfg = normalizeCfg(cfg);
   saveCfg();
 }
 const ep = () => cfg[cfg.mode];
@@ -121,6 +150,7 @@ async function renderTree() {
     for (const it of items) {
       const el = document.createElement('div');
       el.className = 'node' + (it.path === activePath ? ' active' : '');
+      el.dataset.path = it.path;
       el.style.paddingLeft = 8 + depth * 14 + 'px';
       el.innerHTML = `<span class="ic">${it.dir ? (expanded.has(it.path) ? '▾' : '▸') : '·'}</span><span>${esc(it.name)}</span>`;
       el.onclick = () => { if (it.dir) { expanded.has(it.path) ? expanded.delete(it.path) : expanded.add(it.path); renderTree(); } else openFile(it.path); };
@@ -134,6 +164,8 @@ async function renderTree() {
 }
 $('#tree').oncontextmenu = (e) => { e.preventDefault(); nodeMenu(e, null); };
 $('#refresh').onclick = renderTree;
+/* Переключение вкладки не должно заново обходить дерево по сети — достаточно переставить класс. */
+function syncActiveNode() { $$('#tree .node').forEach(el => el.classList.toggle('active', el.dataset.path === activePath)); }
 function showMenu(e, items) {
   const m = $('#menu'); m.innerHTML = '';
   for (const it of items) {
@@ -155,7 +187,14 @@ async function newDir(dir = '') { const n = prompt(tr('new_dir_q')); if (!n) ret
 async function renameNode(it) {
   const n = prompt(tr('rename_q'), it.name); if (!n || n === it.name) return;
   const to = join(it.path.split('/').slice(0, -1).join('/'), n);
-  try { await post('/api/fsop', { op: 'rename', path: it.path, to }); tabs.forEach(t => { if (t.path === it.path) t.path = to; }); if (activePath === it.path) activePath = to; renderTabs(); renderTree(); } catch (e) { toast(e.message); }
+  const moved = (p) => p === it.path ? to : (it.dir && p.startsWith(it.path + '/') ? to + p.slice(it.path.length) : p);
+  try {
+    await post('/api/fsop', { op: 'rename', path: it.path, to });
+    tabs.forEach(t => { t.path = moved(t.path); });
+    [...expanded].forEach(p => { const q = moved(p); if (q !== p) { expanded.delete(p); expanded.add(q); } });
+    activePath = moved(activePath);
+    renderTabs(); renderTree();
+  } catch (e) { toast(e.message); }
 }
 async function deleteNode(it) {
   if (!confirm(tr('del_q', it.path))) return;
@@ -256,7 +295,11 @@ async function openHistory() {
       info.innerHTML = '<b style="font-size:12px;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(it.path) + '</b>' +
         '<span class="hint">' + esc(histTime(it.ts)) + ' · ' + esc(fmtSize(it.size)) + (it.created ? ' · ' + esc(tr('hist_created')) : '') + '</span>';
       const open = document.createElement('button'); open.className = 'ghost'; open.textContent = tr('hist_openfile');
-      open.onclick = async () => { closeHistory(); await openFile(it.path, true); };
+      open.onclick = async () => {
+        const t = tabs.find(x => x.path === it.path);
+        if (t && t.dirty && !confirm(tr('unsaved'))) return;
+        closeHistory(); await openFile(it.path, true);
+      };
       const undo = document.createElement('button'); undo.textContent = tr('hist_restore');
       undo.onclick = async () => {
         undo.disabled = true;
@@ -301,9 +344,13 @@ function findScan() {
   const q = $('#findIn').value;
   findHits = []; findIdx = -1;
   if (!q) { $('#findCnt').textContent = ''; return; }
-  const v = ed.value.toLowerCase(), qq = q.toLowerCase();
-  let i = 0;
-  while (findHits.length < 5000) { const at = v.indexOf(qq, i); if (at < 0) break; findHits.push(at); i = at + Math.max(1, qq.length); }
+  const v = ed.value;
+  let re; try { re = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'); } catch { return; }
+  let m;
+  while (findHits.length < 5000 && (m = re.exec(v))) {
+    if (!m[0].length) { re.lastIndex++; continue; }
+    findHits.push(m.index);
+  }
   if (!findHits.length) { $('#findCnt').textContent = tr('find_none'); return; }
   const p = ed.selectionStart, near = findHits.findIndex(x => x >= p);
   findIdx = near < 0 ? 0 : near;
@@ -370,7 +417,7 @@ async function exportZip() {
     a.href = URL.createObjectURL(blob);
     a.download = (info.name || 'project') + '-' + d.getFullYear() + p2(d.getMonth() + 1) + p2(d.getDate()) + '.zip';
     document.body.appendChild(a); a.click();
-    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 5000);
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 60000);
     out.textContent = tr('zip_done', fmtSize(blob.size));
   } catch (e) { out.textContent = e.message; }
   finally { b.disabled = false; }
@@ -472,7 +519,7 @@ function render() {
 function activate(p) {
   const prevT = cur(); if (cfg.autosave && prevT && prevT.dirty && prevT.path !== p) saveTab(prevT, true);
   activePath = p; clearGhost(); hideInline();
-  const t = cur(); ed.value = t ? t.content : ''; render.n = 0; render(); renderTabs(); renderTree(); syncScroll(); updateStatus();
+  const t = cur(); ed.value = t ? t.content : ''; render.n = 0; render(); renderTabs(); syncActiveNode(); syncScroll(); updateStatus();
   if (t) { ed.scrollTop = t.scroll || 0; syncScroll(); }
 }
 function pushRecent(f) { try { const a = JSON.parse(localStorage['lc_recent'] || '[]').filter(x => x !== f); a.unshift(f); localStorage['lc_recent'] = JSON.stringify(a.slice(0, 20)); } catch {} }
@@ -665,10 +712,11 @@ $('#inlInput').addEventListener('keydown', async (e) => {
   if (e.key === 'Escape') { hideInline(); ed.focus(); return; }
   if (e.key !== 'Enter' || !e.target.value.trim() || !inl) return;
   const v = ed.value, sel = v.slice(inl.s, inl.e);
+  const selForModel = sel.slice(0, P().ctxChars);
   const ctx = P().ctxChars / 2;
   const msgs = [
     { role: 'system', content: 'You are a code editor. Return ONLY the new code that replaces the selected fragment (or is inserted at the cursor if the selection is empty) — no explanations and no markdown fences. Keep the indentation and style of the file.' },
-    { role: 'user', content: `File: ${cur().path}\n\nCode before:\n${v.slice(Math.max(0, inl.s - ctx), inl.s)}\n\n<SELECTED>\n${sel}\n</SELECTED>\n\nCode after:\n${v.slice(inl.e, inl.e + ctx / 2)}\n\nTask (the user may write in any language): ${e.target.value.trim()}` }];
+    { role: 'user', content: `File: ${cur().path}\n\nCode before:\n${v.slice(Math.max(0, inl.s - ctx), inl.s)}\n\n<SELECTED>\n${selForModel}\n</SELECTED>\n\nCode after:\n${v.slice(inl.e, inl.e + ctx / 2)}\n\nTask (the user may write in any language): ${e.target.value.trim()}` }];
   $('#inlPrev').hidden = false; $('#inlOut').innerHTML = ''; $('#inlState').textContent = tr('i_wait'); $('#inlOk').disabled = true;
   inlCtl = new AbortController(); let acc = '';
   try {
@@ -784,7 +832,7 @@ function fn(name, description, props, required) { return { type: 'function', fun
 // Поиск в интернете и чтение ссылок передают данные наружу — тоже только с подтверждением.
 const NEEDS_OK = new Set(['write_file', 'replace_in_file', 'apply_patch', 'run_command', 'open', 'delete_path', 'web_search', 'fetch_url']);
 const needsOk = (n, a) => NEEDS_OK.has(n) || (n === 'bluetooth' && /^(on|off)$/i.test((a && a.action) || ''));
-let chatHist = [], busy = false, stopFlag = false, chatCtl = null, pendingAsk = null;
+let chatHist = [], busy = false, stopFlag = false, chatCtl = null, pendingAsk = null, chatGen = 0;
 
 function useTools() { return ep().useTools && $('#chatMode').value === 'agent'; }
 function systemPrompt(tools, textAgent) {
@@ -871,7 +919,7 @@ async function runTool(call) {
     const r = await post('/api/tool', { name, args }, chatCtl && chatCtl.signal);
     if (r.warnings) flashWarnings(r.warnings);
     if (name === 'write_file' || name === 'replace_in_file' || name === 'apply_patch') {
-      const before = r.before, after = name === 'write_file' ? args.content : null;
+      const before = r.before;
       body.innerHTML = `<pre>${name === 'write_file' ? diffHtml(before ?? '', args.content) : name === 'apply_patch' ? patchHtml(args.patch) : diffHtml(args.old_str, args.new_str)}</pre><div class="bar"><button>${esc(tr('revert'))}</button><span>${before === null ? esc(tr('new_file_tag')) : ''}</span></div>`;
       body.querySelector('button').onclick = async (ev) => {
         try { if (before === null) await post('/api/fsop', { op: 'delete', path: args.path }); else await post('/api/file', { path: args.path, content: before });
@@ -879,7 +927,7 @@ async function runTool(call) {
       };
       const inProj = !/^(~|[a-zA-Z]:[\\/]|[\\/])/.test(args.path), open = tabs.find(t => t.path === args.path);
       if (inProj) { if (open && !open.dirty) await openFile(args.path, true); else if (!open) await openFile(args.path); }
-      renderTree(); refreshGitSoon(); void after;
+      renderTree(); refreshGitSoon();
     } else {
       if (name === 'run_command') { termPrint(`$ ${args.command}\n${r.result}\n\n`); renderTree(); refreshGitSoon(); }
       body.innerHTML = `<pre>${esc(String(r.result).slice(0, 4000))}</pre>`;
@@ -892,7 +940,16 @@ function closeTabForce(p) { tabs = tabs.filter(t => t.path !== p); activate(tabs
 async function attachMentions(text) {
   const set = new Set(), out = [];
   for (const m of text.matchAll(/@([\w.\-\/\\]+)/g)) { const p = m[1].replace(/\\/g, '/'); if (files.includes(p)) set.add(p); }
-  for (const p of set) { try { const { content } = await api('/api/file?path=' + encodeURIComponent(p)); out.push(`### ${p}\n\`\`\`\n${content.slice(0, P().ctxChars)}\n\`\`\``); } catch (er) { toast(L2(`Не удалось прикрепить ${p}: `, `Could not attach ${p}: `) + er.message, 5000); } }
+  let budget = P().ctxChars * 2;                       // десяток файлов не должен вытеснить сам вопрос
+  for (const p of set) {
+    if (budget <= 0) { toast(L2('Часть файлов не прикреплена: слишком много текста', 'Some files were not attached: too much text'), 4000); break; }
+    try {
+      const { content } = await api('/api/file?path=' + encodeURIComponent(p));
+      const part = content.slice(0, Math.min(P().ctxChars, budget));
+      budget -= part.length;
+      out.push(`### ${p}\n\`\`\`\n${part}\n\`\`\``);
+    } catch (er) { toast(L2(`Не удалось прикрепить ${p}: `, `Could not attach ${p}: `) + er.message, 5000); }
+  }
   return out.length ? tr('attached') + '\n' + out.join('\n') : '';
 }
 function saveChat() { try { localStorage['lc_chat:' + info.root] = JSON.stringify(chatHist.slice(-40)); } catch {} }
@@ -1083,7 +1140,7 @@ async function genProgram(raw, it) {
   say(L2(`Готово: создал \`${name}\` и открыл в редакторе. ${it.ext === 'html' ? 'Нажмите ▶ Запуск, чтобы открыть в браузере.' : 'Нажмите ▶ Запуск (F5), чтобы запустить, или 🐞 Отладка (Shift+F5).'}`, `Done: created \`${name}\` and opened it in the editor. ${it.ext === 'html' ? 'Press ▶ Run to open it in the browser.' : 'Press ▶ Run (F5) to run it or 🐞 Debug (Shift+F5).'}`));
 }
 function choosePath(title, list, tool) {
-  addMsg('ai', `<div>${esc(title)}</div><div class="choices">` + list.map(x => `<button class="choice" data-pick="${escA(x.path)}" data-tool="${tool}">${esc(x.path)}</button>`).join('') + '</div>');
+  addMsg('ai', `<div>${esc(title)}</div><div class="choices">` + list.map(x => `<button class="choice" data-pick="${escA(x.path)}" data-tool="${escA(tool)}">${esc(x.path)}</button>`).join('') + '</div>');
   chatHist.push({ role: 'assistant', content: title + '\n' + list.map(x => '- ' + x.path).join('\n') }); saveChat();
 }
 async function runIntent(it, raw) {
@@ -1146,15 +1203,17 @@ async function send(opts = {}) {
   if (!e.baseUrl || !e.model) return openSettings();
   if (cfg.mode === 'online' && !e.apiKey && !/localhost|127\.0\.0\.1/.test(e.baseUrl)) { toast(tr('need_key')); return openSettings('online'); }
   stopSpeak(); $('#prompt').value = ''; setBusy(true); stopFlag = false; chatCtl = new AbortController();
+  const gen = ++chatGen;                                 // ответ старого запроса не должен трогать новый чат
   addMsg('user', esc(raw));
   const att = await attachMentions(raw);
+  if (gen !== chatGen) return;                           // за время прикрепления файлов нажали «Новый чат»
   chatHist.push({ role: 'user', content: att ? raw + '\n\n' + att : raw });
   const agent = !opts.quick && $('#chatMode').value === 'agent';
   const native = agent && ep().useTools, textAgent = agent && !native;
   const fctx = fileContext(!!opts.force), tStart = performance.now();
   let lastShown = '';                                   // вне цикла: нужно и после выхода из него
   try {
-    if (!opts.quick) { const it = routeIntent(raw); if (it) { await runIntent(it, raw); setBusy(false); return; } }
+    if (!opts.quick) { const it = routeIntent(raw); if (it) { await runIntent(it, raw); if (gen === chatGen) setBusy(false); return; } }
     for (let i = 0; i < (textAgent ? 8 : 25) && !stopFlag; i++) {
       const bub = addMsg('ai', `<span class="hint">${esc(tr('c_think'))}</span>`); let acc = '', raf = 0;
       let m;
@@ -1163,6 +1222,7 @@ async function send(opts = {}) {
         onDelta: d => { acc += d; if (!raf) raf = setTimeout(() => { raf = 0; bub.innerHTML = md(textAgent ? visible(acc) : acc) || '<span class="hint">…</span>'; scrollLog(); }, 70); } }); }
       catch (er) { clearTimeout(raf); bub.remove(); throw er; }
       clearTimeout(raf); showStat((performance.now() - tLlm) / 1000, (m.content || '').length);
+      if (gen !== chatGen) return;                       // «Новый чат» во время ответа: историю не трогаем
       let tcall = null;
       if (textAgent && m.content) { tcall = parseTextTool(m.content); if (tcall) m = { ...m, content: m.content.slice(0, tcall.end) }; }
       const shown = textAgent ? visible(m.content || '') : m.content;
@@ -1171,16 +1231,28 @@ async function send(opts = {}) {
       chatHist.push(m); saveChat();
       if (tcall) {
         const out = await runTool({ id: 'tc' + Date.now(), function: { name: tcall.name, arguments: JSON.stringify(tcall.args) } });
+        if (gen !== chatGen) return;
         chatHist.push({ role: 'user', content: TR_PREFIX + tcall.name + ']\n' + String(out).slice(0, Math.max(2000, P().ctxChars / 3)) }); saveChat();
         continue;
       }
       if (!m.tool_calls || !m.tool_calls.length) { speakReply(shown); break; }
-      for (const c of m.tool_calls) { const out = await runTool(c); chatHist.push({ role: 'tool', tool_call_id: c.id, content: out }); if (stopFlag) break; }
+      for (let k = 0; k < m.tool_calls.length; k++) {
+        if (gen !== chatGen) return;
+        const c = m.tool_calls[k];
+        if (stopFlag) {
+          /* У каждого tool_call в истории должен быть ответ, иначе следующий запрос к модели будет отвергнут. */
+          for (const rest of m.tool_calls.slice(k)) chatHist.push({ role: 'tool', tool_call_id: rest.id, content: 'Cancelled by the user.' });
+          break;
+        }
+        const out = await runTool(c); if (gen !== chatGen) return; chatHist.push({ role: 'tool', tool_call_id: c.id, content: out });
+      }
       saveChat();
     }
+    if (gen !== chatGen) return;
     if (stopFlag) addMsg('sys', tr('stopped'));
     else if (performance.now() - tStart > 3000) { const u = uiCfg(); if (u.sound) beep(); if (u.notify) notifyDone(lastShown); }
   } catch (er) {
+    if (gen !== chatGen) return;
     if (stopFlag || /Остановлено|Stopped|abort/i.test(er.message)) addMsg('sys', tr('stopped'));
     else {
       let hint = tr('err_hint');
@@ -1190,12 +1262,16 @@ async function send(opts = {}) {
       if (chatHist.length && chatHist[chatHist.length - 1].role === 'user') chatHist.pop();
     }
   }
-  setBusy(false);
+  if (gen === chatGen) setBusy(false);
 }
 
 $('#send').onclick = () => send();
 $('#stop').onclick = () => { stopSpeak(); stopFlag = true; if (chatCtl) chatCtl.abort(); if (pendingAsk) pendingAsk(false); };
-$('#newChat').onclick = () => { stopSpeak(); chatHist = []; $('#log').innerHTML = ''; saveChat(); };
+$('#newChat').onclick = () => {
+  stopSpeak(); stopFlag = true; chatGen++; if (chatCtl) chatCtl.abort(); if (pendingAsk) pendingAsk(false);
+  stopFlag = false; setBusy(false);                       // старый ответ больше не трогает новый чат
+  chatHist = []; $('#log').innerHTML = ''; saveChat();
+};
 $('#chatMode').onchange = () => updateStatus2();
 
 /* @-упоминания */
@@ -1311,7 +1387,7 @@ function loadForm() {
   $('#fProfile').value = draft.profile; $('#fAC').checked = draft.autocomplete; $('#fTheme').value = draft.theme;
   $('#fLang').value = draft.lang || LANG; $('#fAutosave').checked = !!draft.autosave; $('#fWeb').checked = !!draft.webSearch;
   $('#fPrompt').value = draft.sysPrompt || ''; $('#fVoiceSend').checked = draft.voiceSend !== false; $('#fVoiceSpeak').checked = !!draft.voiceSpeak;
-  $('#catBox').hidden = editMode !== 'offline';
+  $('#catBox').style.display = editMode === 'offline' ? '' : 'none';
   loadUiForm(); renderBuild();
   if (editMode === 'offline') loadCatalog();
 }
@@ -1395,7 +1471,7 @@ $('#fPreset').onchange = () => {
   const mem = draft.keyMemo[editMode + ':' + k] || [];
   draft[editMode] = { ...mkEp(editMode, k), apiKeys: mem, apiKey: mem[0] || '' }; loadForm();
 };
-const keysFromForm = () => { const ks = [...new Set($('#fKeys').value.split(/[\s,;]+/).map(x => x.trim()).filter(Boolean))]; return { apiKeys: ks, apiKey: ks[0] || '' }; };
+const keysFromForm = () => { const ks = [...new Set($('#fKeys').value.split(/[\s,;]+/).map(x => x.trim()).filter(Boolean))].slice(0, 20); return { apiKeys: ks, apiKey: ks[0] || '' }; };
 $('#fKeysShow').onchange = () => $('#fKeys').classList.toggle('show', $('#fKeysShow').checked);
 // «Без подтверждений» снимает защиту от опасных действий — спрашиваем один раз при включении.
 $('#auto').onchange = () => {
@@ -1670,7 +1746,9 @@ function applyUi(u) {
   $('#quick').hidden = u.quick === false;
   let st = $('#userCss'); if (!st) { st = document.createElement('style'); st.id = 'userCss'; document.head.appendChild(st); }
   st.textContent = u.css || '';
-  if (typeof render === 'function' && cur && cur()) { render.n = 0; render(); syncScroll(); }
+  /* Оформление меняется только через CSS-переменные: пересобирать подсветку всего файла на каждый
+     сдвиг ползунка не нужно — достаточно выровнять слои прокрутки. */
+  if (cur && cur()) { try { syncScroll(); } catch {} }
 }
 function readUiForm() {
   return { accent: $('#fAccent').dataset.on === '1' ? $('#fAccent').value : '', fs: +$('#fFs').value, lh: +$('#fLh').value, font: $('#fFont').value, chatFs: +$('#fChatFs').value,
@@ -1768,7 +1846,7 @@ async function openFolder() {
   try { await post('/api/chdir', { path: p }); location.reload(); } catch (e) { toast(e.message); }
 }
 $('#projBtn').onclick = (e) => { e.stopPropagation(); const r = e.target.getBoundingClientRect(); showMenu({ clientX: r.left, clientY: r.bottom + 4 },
-  [...(info.recent || []).filter(x => x !== info.root).slice(0, 6).map(p => [p, async () => { await post('/api/chdir', { path: p }); location.reload(); }]), '-', ['Открыть папку…', openFolder]]); };
+  [...(info.recent || []).filter(x => x !== info.root).slice(0, 6).map(p => [p, async () => { await post('/api/chdir', { path: p }); location.reload(); }]), '-', [tr('m_openfolder'), openFolder]]); };
 
 /* ================= Панели и горячие клавиши ================= */
 $$('.split').forEach(s => s.addEventListener('mousedown', (e) => {
@@ -1815,7 +1893,9 @@ const ATT_RE = /\n\n(?:Прикреплённые файлы|Attached files):/;
   initCfg(info.defaults || {}); applyTheme();
   if (cfg.lang && cfg.lang !== LANG) LANG = cfg.lang;
   let saved = null; try { saved = JSON.parse(localStorage['lc_tabs:' + info.root] || 'null'); } catch {}
-  $('#projBtn').textContent = '📁 ' + info.name; $('#projBtn').title = info.root; $('#cwd').textContent = info.root;
+  $('#projBtn').textContent = '📁 ' + info.name;
+  $('#projBtn').removeAttribute('data-i18n-title');        // иначе applyI18n() затрёт подсказку путём к папке
+  $('#projBtn').title = info.root; $('#cwd').textContent = info.root;
   document.title = info.name + ' — LocalCode';
   try { rules = (await api('/api/rules')).rules; } catch {}
   try { chatHist = JSON.parse(localStorage['lc_chat:' + info.root] || '[]'); } catch { chatHist = []; }
@@ -1839,7 +1919,7 @@ $('#empty').addEventListener('click', (e) => {
 /* ================= Дополнительно: экспорт чата, звук, статистика, резервная копия настроек ================= */
 function downloadText(name, text, mime = 'text/plain') {
   const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type: mime + ';charset=utf-8' })); a.download = name; document.body.appendChild(a); a.click();
-  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500);
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 10000);
 }
 function exportChat() {
   const rows = chatHist.filter(m => (m.role === 'user' && !isToolRes(m)) || (m.role === 'assistant' && visible(m.content)));
@@ -1880,7 +1960,7 @@ $('#fImportFile').onchange = async (e) => {
     const j = JSON.parse(await f.text()), c = j.cfg || j;
     if (!c || typeof c !== 'object' || !c.offline || !c.online) throw new Error(L2('Это не файл настроек LocalCode', 'This is not a LocalCode settings file'));
     for (const m of ['offline', 'online']) { if (!(c[m].apiKeys && c[m].apiKeys.length) && !c[m].apiKey) { c[m].apiKeys = cfg[m].apiKeys || []; c[m].apiKey = cfg[m].apiKey || ''; } }
-    cfg = { ...cfg, ...c }; saveCfg(); toast(L2('Настройки загружены, перезапускаю окно…', 'Settings loaded, reloading…')); setTimeout(() => location.reload(), 700);
+    cfg = normalizeCfg({ ...cfg, ...c }); saveCfg(); toast(L2('Настройки загружены, перезапускаю окно…', 'Settings loaded, reloading…')); setTimeout(() => location.reload(), 700);
   } catch (er) { toast(er.message, 6000); }
 };
 $('#fResetAll').onclick = () => { if (confirm(L2('Сбросить ВСЕ настройки (включая ключи API)? Проекты и файлы не пострадают.', 'Reset ALL settings (including API keys)? Projects and files are not affected.'))) { localStorage.removeItem('lc_cfg2'); location.reload(); } };

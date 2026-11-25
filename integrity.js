@@ -38,8 +38,13 @@ function signManifest(appDir, privateKey, { version = '', files } = {}) {
   obj.sig = b64u(crypto.sign(null, Buffer.from(manifestBody(obj), 'utf8'), privateKey));
   return obj;
 }
+function safeManifestPath(rel) {
+  return typeof rel === 'string' && rel.length > 0 && rel.length < 400
+    && !path.isAbsolute(rel) && !rel.split(/[\\/]/).includes('..') && !rel.includes('\0');
+}
 function verifyManifest(appDir, publicKey, man) {
   if (!man || man.v !== 1 || !man.files) return { ok: false, reason: 'malformed' };
+  if (!Object.keys(man.files).every(safeManifestPath)) return { ok: false, reason: 'malformed' };
   let good = false;
   try { good = crypto.verify(null, Buffer.from(manifestBody(man), 'utf8'), publicKey, unb64u(man.sig)); } catch { good = false; }
   if (!good) return { ok: false, reason: 'signature' };
