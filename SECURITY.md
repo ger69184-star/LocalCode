@@ -85,6 +85,26 @@ LocalCode — локальный редактор кода с ИИ. Сервер
 - Не подключайте в качестве `Base URL` чужие серверы, которым не доверяете: туда уйдут ваши сообщения
   и код, который вы отправите модели.
 
+## Ограничение нагрузки (DoS)
+
+- Частота запросов к `/api/*` ограничена: всплеск до 60 запросов, восстановление 8 в секунду; дальше
+  сервер отвечает `429` с `Retry-After`. Это защищает от «шторма» локальных скриптов и случайных циклов.
+- Обход каталогов (`search`, список файлов) ограничен 24 уровнями вложенности; символические ссылки
+  не обходятся. Огромное дерево больше не может подвесить сервер.
+- Терминал: не более 12 одновременных процессов, команда до 10 000 символов, вывод до 20 МБ на процесс;
+  при медленном клиенте включается обратное давление, поэтому сервер не копит вывод в памяти.
+  В интерфейсе хранится не больше 400 000 символов вывода.
+- Тело запроса — только JSON, до 30 МБ (аудио — до 40 МБ), с таймаутами на чтение.
+
+## Лицензия и целостность
+
+Проверка лицензии выполняется на сервере, офлайн, по подписи Ed25519 (`license.js`,
+`license-pub.pem`, `license-policy.json`). Без действующего ключа после пробного периода
+блокируются только ИИ-маршруты (`/api/chat`, `/api/tool`, `/api/models`, `/api/stt*`,
+`/api/term/run` и подобные); редактор и файлы остаются доступны. `integrity.json` —
+подписанный список sha256 основных файлов; `public/style.css` в него намеренно не входит,
+поэтому оформление можно менять. Подробности и выпуск ключей — в `LICENSING.md`.
+
 ## Если что-то пошло не так
 
 1. Закройте окно LocalCode — сервер завершится, токен перестанет действовать.
@@ -104,3 +124,7 @@ LAN and cloud-metadata addresses (DNS answers and every redirect are checked). `
 `0700` and `config.json` is `0600`; git runs with hooks/fsmonitor/pager disabled. Destructive agent
 actions require confirmation. API keys live in browser `localStorage` and are not encrypted; the
 terminal can run arbitrary commands by design. Do not expose the port or open the app on an untrusted machine.
+
+License checks run server-side and offline (Ed25519 signature, `license.js`). After the trial, AI
+endpoints require a valid key; the editor and file operations stay available. `integrity.json` is a signed
+manifest of the main files (styles are excluded on purpose). See `LICENSING.md`.

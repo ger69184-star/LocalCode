@@ -81,3 +81,16 @@ test('search: не читает файлы через символические
   fs.writeFileSync(path.join(root, 'normal.txt'), 'needle-in-normal\n');
   assert.match(S.search('needle-in-normal'), /normal\.txt/);
 });
+
+test('allFiles: не обходит символические ссылки и не читает чужое дерево', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lc-all-'));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'lc-out2-'));
+  fs.writeFileSync(path.join(outside, 'private.txt'), 'secret');
+  fs.writeFileSync(path.join(root, 'own.txt'), 'ok');
+  S.setRoot(root);
+  try { fs.symlinkSync(outside, path.join(root, 'link'), 'dir'); }
+  catch { t.skip('символические ссылки недоступны в этой системе'); return; }
+  const list = S.allFiles();
+  assert.ok(list.includes('own.txt'));
+  assert.equal(list.some(f => f.includes('private.txt')), false);
+});

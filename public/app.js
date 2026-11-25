@@ -21,7 +21,16 @@ const H = () => ({ 'x-token': TOKEN, 'Content-Type': 'application/json', 'x-lang
 async function api(path, opts = {}) {
   const r = await fetch(path, { ...opts, headers: H() });
   const j = await r.json().catch(() => ({ error: tr('err_resp') }));
-  if (!r.ok) throw new Error(j.error || r.statusText);
+  if (!r.ok) {
+    const ew = new Error(j.error || r.statusText);
+    ew.code = j.code; ew.reason = j.reason; ew.license = j.license;
+    if (j.code === 'license') {
+      if (j.license) { info.license = j.license; try { renderLicense(); } catch {} }
+      toast(ew.message, 6000);
+      if (!api.licShown && bootDone) { api.licShown = true; try { openSettings(); } catch {} }
+    }
+    throw ew;
+  }
   return j;
 }
 const post = (p, d, signal) => api(p, { method: 'POST', body: JSON.stringify(d), signal });
@@ -96,7 +105,7 @@ async function llm(messages, { tools, onDelta, signal, opts, e } = {}) {
 }
 
 /* ================= Состояние ================= */
-let info = {}, files = [], rules = '';
+let info = {}, files = [], rules = '', bootDone = false;
 let tabs = [], activePath = null;
 const ed = $('#editor'), hl = $('#hl');
 const cur = () => tabs.find(t => t.path === activePath);
@@ -356,15 +365,18 @@ $('#inlOk').onclick = () => { if (!inl) return; const r = inl; hideInline(); ed.
 $('#inlNo').onclick = () => { hideInline(); ed.focus(); };
 
 /* ================= Терминал ================= */
-let termCwd = '', termProc = 0, termLast = { code: 0, out: '' };
+let termCwd = '', termProc = 0, termLast = { code: 0, out: '' }, termChars = 0;
+function clearTerm() { $('#termOut').textContent = ''; termChars = 0; }
 function termPrint(s, cls) {
   const o = $('#termOut'); if (!s) return;
   const sp = document.createElement('span'); if (cls) sp.className = cls; sp.textContent = s; o.appendChild(sp);
-  while (o.childNodes.length > 1500) o.removeChild(o.firstChild);
+  termChars += s.length;
+  /* Ограничиваем и число узлов, и объём текста: долгий вывод не съест память вкладки. */
+  while (o.firstChild && (o.childNodes.length > 1500 || termChars > 400000)) { termChars -= (o.firstChild.textContent || '').length; o.removeChild(o.firstChild); }
   o.scrollTop = o.scrollHeight;
 }
 function toggleTerm(force) { const show = force ?? $('#term').hidden; $('#term').hidden = !show; $('#splitT').hidden = !show; if (show) $('#cmd').focus(); }
-$('#termBtn').onclick = () => toggleTerm(); $('#clearTerm').onclick = () => { $('#termOut').textContent = ''; };
+$('#termBtn').onclick = () => toggleTerm(); $('#clearTerm').onclick = () => clearTerm();
 function setTermBusy(b) {
   $('#termStop').hidden = !b; $('#cmd').placeholder = b ? L2('ввод для программы и Enter (Ctrl+C — остановить)', 'input for the program and Enter (Ctrl+C stops)') : tr('t_ph');
   $('#termIn span').textContent = b ? '⏵' : ($('#termShell').value === 'powershell' ? 'PS>' : '$');
@@ -382,8 +394,8 @@ async function termRun(command) {
         const line = buf.slice(0, i); buf = buf.slice(i + 1); if (!line) continue;
         const o = JSON.parse(line);
         if (o.t === 'start') { termProc = o.id; termCwd = o.cwd; $('#cwd').textContent = o.cwd; }
-        else if (o.t === 'out') { termPrint(o.v); out += o.v; }
-        else if (o.t === 'err') { termPrint(o.v, 'te'); out += o.v; }
+        else if (o.t === 'out') { termPrint(o.v); if (out.length < 400000) out += o.v; }
+        else if (o.t === 'err') { termPrint(o.v, 'te'); if (out.length < 400000) out += o.v; }
         else if (o.t === 'cwd') { termCwd = o.v; $('#cwd').textContent = o.v; }
         else if (o.t === 'exit') code = o.code;
       }
@@ -411,7 +423,7 @@ $('#cmd').addEventListener('keydown', async (e) => {
   const c = e.target.value; e.target.value = '';
   if (termProc) { termPrint(c + '\n', 'tx'); post('/api/term/input', { id: termProc, data: c + '\n' }).catch(() => {}); return; }
   if (!c.trim()) return;
-  if (/^(cls|clear)$/i.test(c.trim())) { $('#termOut').textContent = ''; return; }
+  if (/^(cls|clear)$/i.test(c.trim())) { clearTerm(); return; }
   cmdHist.push(c); cmdI = cmdHist.length; termPrint('$ ' + c + '\n', 'tc');
   termRun(c);
 });
@@ -892,7 +904,7 @@ function paletteActions() {
     [L2('Файл: новый файл', 'File: new file'), () => $('#newFile').click()], [L2('Файл: сохранить всё', 'File: save all'), async () => { for (const t of tabs) if (t.dirty) await saveTab(t, true); toast(tr('saved')); }],
     [L2('Проект: открыть другую папку', 'Project: open another folder'), () => openFolder()],
     [L2('Код: запустить файл (F5)', 'Code: run the file (F5)'), () => runCurrent(false)], [L2('Код: отладка (Shift+F5)', 'Code: debug (Shift+F5)'), () => runCurrent(true)],
-    [L2('Терминал: показать или скрыть', 'Terminal: show or hide'), () => toggleTerm()], [L2('Терминал: очистить', 'Terminal: clear'), () => { $('#termOut').textContent = ''; }],
+    [L2('Терминал: показать или скрыть', 'Terminal: show or hide'), () => toggleTerm()], [L2('Терминал: очистить', 'Terminal: clear'), () => { clearTerm(); }],
     [L2('Git: статус', 'Git: status'), () => { toggleTerm(true); termRun('git status'); }],
     [L2('Git: сохранить изменения (коммит)…', 'Git: commit changes…'), () => { const m = prompt(L2('Описание изменений:', 'Commit message:'), L2('Правки', 'Update')); if (m) { toggleTerm(true); termRun('git add -A && git commit -m "' + m.replace(/["`$\\]/g, ' ') + '"'); } }],
     [L2('Чат: новый чат', 'Chat: new chat'), () => $('#newChat').click()], [L2('Чат: сохранить в файл', 'Chat: export to a file'), () => exportChat()], [L2('Чат: скопировать последний ответ', 'Chat: copy the last answer'), () => copyLast()],
@@ -947,7 +959,7 @@ function loadForm() {
   $('#fLang').value = draft.lang || LANG; $('#fAutosave').checked = !!draft.autosave; $('#fWeb').checked = !!draft.webSearch;
   $('#fPrompt').value = draft.sysPrompt || ''; $('#fVoiceSend').checked = draft.voiceSend !== false; $('#fVoiceSpeak').checked = !!draft.voiceSpeak;
   $('#catBox').hidden = editMode !== 'offline';
-  loadUiForm();
+  loadUiForm(); renderLicense();
   if (editMode === 'offline') loadCatalog();
 }
 
@@ -1056,6 +1068,52 @@ $('#fTest').onclick = async () => {
   readForm(); const el = $('#fTestRes'); el.textContent = tr('testing');
   try { const m = await llm([{ role: 'user', content: 'Reply with one word: ok' }], { e: draft[editMode], opts: { maxTokens: 16 } }); el.textContent = tr('test_ok', (m.content || '').slice(0, 40)); }
   catch (er) { el.textContent = '✗ ' + er.message; }
+};
+/* ---- лицензия ---- */
+function licReasonKey(r) { return ['malformed', 'signature', 'expired', 'machine', 'disabled'].includes(r) ? 'lic_r_' + r : 'lic_r_other'; }
+function licDescribe(l) {
+  l = l || (info.license || {});
+  if (!l.enabled || l.state === 'disabled') return tr('lic_off');
+  let s;
+  if (l.state === 'licensed') s = tr('lic_ok', l.plan || '—', l.expires || tr('lic_forever'));
+  else if (l.state === 'trial') s = tr('lic_trial', l.trialDaysLeft);
+  else if (l.state === 'tampered') s = tr('lic_tampered', (l.integrity && l.integrity.files || []).join(', '));
+  else if (l.state === 'expired') s = tr('lic_expired');
+  else s = tr('lic_invalid') + ' ' + tr(licReasonKey(l.reason));
+  if (l.state !== 'tampered' && l.integrity && l.integrity.ok === false) s += ' ' + tr('lic_integ', (l.integrity.files || []).join(', '));
+  return s;
+}
+function renderLicense() {
+  const st = $('#licState'); if (!st) return;
+  const l = info.license || {};
+  st.textContent = licDescribe(l);
+  st.style.color = l.state === 'licensed' || l.state === 'trial' ? 'var(--ok)' : l.enabled ? 'var(--err)' : '';
+  const m = $('#licMachine'); if (m) m.value = l.machine || '';
+  $('#licBox').style.display = l.enabled ? '' : 'none';
+  $('#licActivate').disabled = !l.enabled;
+  const canRemove = l.state === 'licensed' || l.state === 'invalid' || l.state === 'tampered' || l.state === 'expired';
+  $('#licRemove').style.display = canRemove ? '' : 'none';
+}
+const licMsg = (t, bad) => { const e = $('#licMsg'); if (e) { e.textContent = t; e.style.color = bad === true ? 'var(--err)' : bad === false ? 'var(--ok)' : ''; } };
+$('#licActivate').onclick = async () => {
+  const token = $('#licToken').value.trim();
+  if (!token) return licMsg(tr('lic_need'), true);
+  licMsg(tr('lic_checking'));
+  try {
+    info.license = await post('/api/license/activate', { token });
+    $('#licToken').value = ''; renderLicense(); licMsg(tr('lic_done'));
+  } catch (e) { info.license = e.license || info.license; renderLicense(); licMsg(e.message, true); }
+};
+$('#licRemove').onclick = async () => {
+  if (!confirm(tr('lic_confirm'))) return;
+  try { info.license = await post('/api/license/remove', {}); renderLicense(); licMsg(tr('lic_removed')); }
+  catch (e) { licMsg(e.message, true); }
+};
+$('#licHelp').onclick = () => licMsg(tr('lic_help_text'));
+$('#licCopy').onclick = async () => {
+  const id = (info.license || {}).machine || '';
+  if (!id) return;
+  try { await navigator.clipboard.writeText(id); toast(tr('lic_copied')); } catch { $('#licMachine').select(); document.execCommand && document.execCommand('copy'); }
 };
 $('#setCancel').onclick = () => { $('#modal').classList.remove('open'); applyTheme(); };
 $('#setSave').onclick = () => {
@@ -1319,7 +1377,7 @@ $('#vRemove').onclick = async () => { if (!confirm(tr('v_ask_remove'))) return; 
 /* ================= Язык, git, быстрые действия, справка ================= */
 function refreshLang() {
   applyI18n(); $('#langBtn').textContent = LANG.toUpperCase();
-  buildQuick(); updateHeader(); updateStatus(); refreshGit();
+  buildQuick(); updateHeader(); updateStatus(); refreshGit(); try { renderLicense(); } catch {}
 }
 $('#langBtn').onclick = () => { LANG = LANG === 'ru' ? 'en' : 'ru'; cfg.lang = LANG; saveCfg(); refreshLang(); };
 
@@ -1434,10 +1492,16 @@ const ATT_RE = /\n\n(?:Прикреплённые файлы|Attached files):/;
   try { chatHist = JSON.parse(localStorage['lc_chat:' + info.root] || '[]'); } catch { chatHist = []; }
   for (const m of chatHist) { if (m.role === 'user') { if (!isToolRes(m)) addMsg('user', esc(m.content.split(ATT_RE)[0])); } else if (m.role === 'assistant' && visible(m.content)) addMsg('ai', md(visible(m.content))); }
   refreshLang(); renderTabs(); renderTree();
+  const L0 = info.license || {};
+  if (L0.enabled) {
+    if (L0.state === 'trial') addMsg('sys', esc(tr('lic_boot_trial', L0.trialDaysLeft)));
+    else if (L0.state === 'expired' || L0.state === 'invalid') addMsg('sys', esc(tr('lic_boot_expired')));
+    else if (L0.state === 'tampered') addMsg('sys', esc(tr('lic_boot_tampered')));
+  }
   if (!chatHist.length) addMsg('sys', esc(tr(cfg.mode === 'offline' ? 'welcome_off' : 'welcome_on')));
   if (rules) addMsg('sys', esc(tr('rules_on')));
-  await autoPickModel();
-  await restoreTabs(saved); tabsReady = true; renderTabs();
+  await autoPickModel().catch(() => {});
+  await restoreTabs(saved); tabsReady = true; renderTabs(); bootDone = true;
   setInterval(() => { if (!document.hidden) refreshGit(); }, 20000);
 })();
 setInterval(() => { fetch('/api/ping', { headers: H() }).catch(() => {}); }, 10000);

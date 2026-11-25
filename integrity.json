@@ -1,0 +1,16 @@
+{
+  "v": 1,
+  "alg": "ed25519",
+  "files": {
+    "server.js": "2166f587fc661785a088c4f26ea65a067ce557dc4ed84721e55c254d1fd90991",
+    "license.js": "ab2764248c7e571faf6f76a185a29979024c3ae50839661108aa9fbcf20e5836",
+    "hw.js": "e670ab6751f61cfabc4eeb75263d01497e67efd3c27c5edcf2917973dcae4b02",
+    "license-pub.pem": "a04e572995224bc494cd03d9d3236f3f42106913d2b7da69291a8ffb663ae2fa",
+    "license-policy.json": "e97dce297ced1bb64ea0a7f1b49cad5623d0670e9e48d3f1ec0f3eda01ab3a0b",
+    "public/index.html": "7742dd4105fb6b29c328483aae11d3c8bb1c98705451a11d3dbe144f91fec4bc",
+    "public/app.js": "2c4f01be5323f7ff741d33a504c0e131891ccbc21402f9b0bdf17eaff35b4a57",
+    "public/i18n.js": "ee0cc6c127e373fb77a3e87861c7c7d7f3acf9f7603069ce4ec661c845493374",
+    "public/highlight.js": "8e18b52051a96a815f5aae3f5e6cd51d20a1353428686de7e075e32352c62846"
+  },
+  "sig": "iUdMF3upBnMZo76mpSn476qpFfqtdyeYBvFT4vyq2MwEvfEFjyZU16bl29vfcKCDcItpBXQICcnQKkvgkDaQDQ"
+}

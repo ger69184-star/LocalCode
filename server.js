@@ -11,6 +11,7 @@ const net = require('net');
 const dns = require('dns').promises;
 const { exec, execFile, spawn } = require('child_process');
 const hwlib = require('./hw');
+const licensing = require('./license');
 
 // Язык сообщений сервера: берётся из заголовка x-lang (по умолчанию — язык системы)
 let SLANG = /^ru/i.test(Intl.DateTimeFormat().resolvedOptions().locale || '') ? 'ru' : 'en';
@@ -53,6 +54,35 @@ const saveConf = () => {
     fs.renameSync(tmp, CFG_FILE);   // атомарная запись: файл не останется «полузаписанным»
   } catch { try { fs.unlinkSync(tmp); } catch {} }
 };
+
+/* ---------- лицензия (офлайн-проверка подписи, см. license.js и LICENSING.md) ---------- */
+const LIC = licensing.create({ appDir: __dirname, cfgDir: CFG_DIR, log });
+/* Эти возможности требуют действующей лицензии (после пробного периода).
+   Редактор, файлы, git и просмотр остаются доступны всегда — это режим «только чтение». */
+const LICENSED_ENDPOINTS = new Set([
+  '/api/chat', '/api/complete', '/api/tool', '/api/models', '/api/keys/test', '/api/keys/reset',
+  '/api/pull', '/api/catalog', '/api/installed', '/api/stt', '/api/stt/install', '/api/term/run',
+]);
+LIC.init();
+function licReason(code) {
+  switch (code) {
+    case 'malformed': return T('Ключ повреждён или скопирован не полностью.', 'The key is damaged or was copied only partly.');
+    case 'signature': return T('Подпись не совпадает: ключ выпущен не для этой программы.', 'The signature does not match: this key was not issued for this app.');
+    case 'expired': return T('Срок действия ключа истёк.', 'This key has expired.');
+    case 'machine': return T('Ключ выдан для другого компьютера. Скопируйте ID компьютера в настройках и попросите новый ключ.', 'The key was issued for another computer. Copy the machine ID in Settings and request a new key.');
+    case 'disabled': return T('Лицензирование в этой сборке не настроено.', 'Licensing is not configured in this build.');
+    default: return T('Ключ не подошёл.', 'The key was not accepted.');
+  }
+}
+function licenseGate(p) {
+  if (!LICENSED_ENDPOINTS.has(p)) return null;
+  const g = LIC.gate();
+  if (g.ok) return null;
+  return {
+    error: T('Нужна действующая лицензия. Откройте «Настройки → Лицензия» и введите ключ.', 'A valid license is required. Open “Settings → License” and enter your key.'),
+    code: 'license', license: LIC.publicStatus(),
+  };
+}
 
 let ROOT;
 function setRoot(p) {
@@ -165,19 +195,23 @@ function listDir(p, allowHome = false) {
   return fs.readdirSync(dir, { withFileTypes: true })
     .filter(e => !IGNORE.has(e.name) && !(allowHome && isSecretFile(path.join(dir, e.name))))
     .map(e => ({ name: e.name, path: rel(path.join(dir, e.name)), dir: e.isDirectory() }))
-    .sort((a, b) => b.dir - a.dir || a.name.localeCompare(b.name));
+    .sort((a, b) => b.dir - a.dir || a.name.localeCompare(b.name))
+    .slice(0, 5000);      // предохранитель от папок с сотнями тысяч файлов
 }
+const MAX_WALK_DEPTH = 24;   // защита от «бесконечных» и очень глубоких деревьев
 function allFiles(limit = 6000) {
   const out = [];
-  (function walk(dir) {
+  (function walk(dir, depth) {
+    if (depth > MAX_WALK_DEPTH) return;
     let list; try { list = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
     for (const e of list) {
       if (out.length >= limit) return;
       if (IGNORE.has(e.name)) continue;
+      if (e.isSymbolicLink()) continue;              // по ссылкам не ходим: они могут вести за пределы проекта
       const full = path.join(dir, e.name);
-      if (e.isDirectory()) walk(full); else out.push(rel(full));
+      if (e.isDirectory()) walk(full, depth + 1); else out.push(rel(full));
     }
-  })(ROOT);
+  })(ROOT, 0);
   return out;
 }
 function readFile(p, allowHome = false) {
@@ -254,8 +288,10 @@ function gitignoreFilter() {
 }
 function search(query, p, regex, allowHome = false) {
   if (!query || !String(query).trim()) throw new Error(T('Пустой запрос поиска', 'Empty search query'));
+  if (String(query).length > 500) throw new Error(T('Слишком длинный запрос поиска (максимум 500 символов)', 'Search query is too long (500 characters max)'));
   const out = [], test = lineMatcher(String(query), regex), ignored = gitignoreFilter();
-  (function walk(dir) {
+  (function walk(dir, depth) {
+    if (depth > MAX_WALK_DEPTH) return;
     let list; try { list = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
     for (const e of list) {
       if (out.length >= 200) return;
@@ -264,13 +300,13 @@ function search(query, p, regex, allowHome = false) {
       const full = path.join(dir, e.name), r = rel(full);
       if (ignored(r, e.isDirectory())) continue;
       if (allowHome && isSecretFile(full)) continue;   // секреты не попадают в результаты поиска агента
-      if (e.isDirectory()) { walk(full); continue; }
+      if (e.isDirectory()) { walk(full, depth + 1); continue; }
       try {
         if (fs.statSync(full).size > 1024 * 1024) continue;
         fs.readFileSync(full, 'utf8').split('\n').forEach((line, i) => { if (out.length < 200 && test(line)) out.push(`${r}:${i + 1}: ${line.trim().slice(0, 200)}`); });
       } catch {}
     }
-  })(safe(p || '', allowHome));
+  })(safe(p || '', allowHome), 0);
   return out.join('\n') || T('Ничего не найдено', 'Nothing found');
 }
 // Поиск в интернете (по желанию: включается в настройках) и чтение страниц. Через DuckDuckGo HTML, без ключей.
@@ -289,7 +325,7 @@ async function webSearch(q) {
   if (!q || !String(q).trim()) throw new Error(T('Пустой запрос', 'Empty query'));
   const r = await fetch('https://html.duckduckgo.com/html/?q=' + encodeURIComponent(q), { headers: { 'User-Agent': 'Mozilla/5.0 (LocalCode)', 'Accept-Language': 'ru,en;q=0.8' }, signal: AbortSignal.timeout(15000) });
   if (!r.ok) throw new Error('HTTP ' + r.status);
-  const res = parseDdg(await r.text());
+  const res = parseDdg((await readCapped(r, 2 * 1024 * 1024)).toString('utf8'));
   return res.length ? res.join('\n') : T('Ничего не найдено', 'Nothing found');
 }
 const PRIVATE_ERR = () => new Error(T('Адреса внутри вашего компьютера и сети закрыты', 'Local and private network addresses are blocked'));
@@ -999,7 +1035,24 @@ function killTree(child) {
 }
 function handleTermRun(b, res) {
   res.writeHead(200, { 'Content-Type': 'application/x-ndjson; charset=utf-8', 'Cache-Control': 'no-cache' });
-  const emit = (o) => { if (!res.writableEnded) res.write(JSON.stringify(o) + '\n'); };
+  let child = null, sent = 0, paused = false;
+  const MAX_OUT = 20 * 1024 * 1024;   // больше 20 МБ в один терминал не отдаём
+  const emit = (o) => {
+    if (res.writableEnded || res.destroyed) return;
+    const line = JSON.stringify(o) + '\n';
+    sent += line.length;
+    if (sent > MAX_OUT) {
+      if (!res.writableEnded) res.write(JSON.stringify({ t: 'err', v: T('\n[остановлено: вывод больше 20 МБ]\n', '\n[stopped: output exceeded 20 MB]\n') }) + '\n');
+      if (child) killTree(child);
+      return;
+    }
+    /* Обратное давление: медленный клиент не заставит сервер копить гигабайты в памяти. */
+    if (!res.write(line) && !paused) {
+      paused = true;
+      try { child && child.stdout.pause(); child && child.stderr.pause(); } catch {}
+      res.once('drain', () => { paused = false; try { child && child.stdout.resume(); child && child.stderr.resume(); } catch {} });
+    }
+  };
   const win = process.platform === 'win32', ps = win && /^p(ower)?s/i.test(b.shell || '');
   const cwd = b.cwd && fs.existsSync(b.cwd) ? b.cwd : ROOT, cmd = String(b.command || '').trim();
   const cm = cmd.match(/^(?:cd|chdir|set-location)(?:\s+\/d)?(?:\s+(.*))?$/i);
@@ -1010,7 +1063,7 @@ function handleTermRun(b, res) {
     emit({ t: 'exit', code: 0 }); return res.end();
   }
   const full = wrapShell(cmd, ps);
-  const child = ps ? spawn('powershell.exe', ['-NoProfile', '-NoLogo', '-Command', full], { cwd, windowsHide: true, env: UTF_ENV }) : spawn(full, [], { cwd, shell: true, windowsHide: true, env: UTF_ENV });
+  child = ps ? spawn('powershell.exe', ['-NoProfile', '-NoLogo', '-Command', full], { cwd, windowsHide: true, env: UTF_ENV }) : spawn(full, [], { cwd, shell: true, windowsHide: true, env: UTF_ENV });
   const id = ++termSeq; TERMS.set(id, child);
   emit({ t: 'start', id, cwd });
   child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
@@ -1022,6 +1075,18 @@ function handleTermRun(b, res) {
 }
 
 /* ---------- HTTP ---------- */
+/* Простой лимит частоты: защита от локального «шторма» запросов (и от чужих скриптов в системе).
+   60 запросов подряд, восстановление 8 в секунду — обычной работе не мешает. */
+const RL = new Map();
+function rateOk(ip) {
+  const now = Date.now();
+  let b = RL.get(ip);
+  if (!b) { if (RL.size > 500) RL.clear(); b = { n: 0, t: now }; RL.set(ip, b); }
+  b.n = Math.max(0, b.n - (now - b.t) / 1000 * 8); b.t = now;
+  if (b.n > 60) return false;
+  b.n += 1;
+  return true;
+}
 const MIME = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
   '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.png': 'image/png', '.json': 'application/json; charset=utf-8',
@@ -1086,6 +1151,7 @@ const server = http.createServer(async (req, res) => {
     if (!allowedHosts.has(hostHeader)) return json(403, { error: 'bad host' });
 
     const p = url.pathname, isApi = p.startsWith('/api/');
+    if (isApi && !rateOk(req.socket.remoteAddress || '')) { res.setHeader('Retry-After', '1'); return json(429, { error: T('Слишком много запросов. Подождите секунду.', 'Too many requests. Wait a second.') }); }
 
     /* CSRF: браузер сам присылает Origin и Sec-Fetch-Site. Чужой сайт не может дёргать API даже с токеном. */
     if (isApi) {
@@ -1115,7 +1181,22 @@ const server = http.createServer(async (req, res) => {
     const only = (m) => { if (req.method === m) return true; json(405, { error: 'method not allowed' }); return false; };
     const str = (v, max = 1e6) => typeof v === 'string' && v.length <= max;
 
-    if (p === '/api/info') { if (!only('GET')) return; return json(200, { root: ROOT, name: path.basename(ROOT), platform: process.platform, home: os.homedir(), defaults: conf.defaults || {}, recent: conf.recent || [] }); }
+    /* Лицензия: статус и активация не блокируются лицензией. */
+    if (p === '/api/license') { if (!only('GET')) return; return json(200, LIC.publicStatus()); }
+    if (p === '/api/license/activate') {
+      if (!only('POST')) return;
+      const b = await body(req);
+      if (!str(b.token, 8192) || String(b.token).length < 40) return json(400, { error: T('Ключ пустой или слишком короткий', 'The key is empty or too short'), license: LIC.publicStatus() });
+      try { LIC.activate(String(b.token).trim()); }
+      catch (e) { return json(400, { error: licReason(e.code), reason: e.code, code: 'license', license: LIC.publicStatus() }); }
+      return json(200, LIC.publicStatus());
+    }
+    if (p === '/api/license/remove') { if (!only('POST')) return; LIC.remove(); return json(200, LIC.publicStatus()); }
+
+    const blocked = licenseGate(p);
+    if (blocked) return json(403, blocked);
+
+    if (p === '/api/info') { if (!only('GET')) return; return json(200, { root: ROOT, name: path.basename(ROOT), platform: process.platform, home: os.homedir(), defaults: conf.defaults || {}, recent: conf.recent || [], license: LIC.publicStatus() }); }
     if (p === '/api/tree') { if (!only('GET')) return; return json(200, listDir(url.searchParams.get('path') || '')); }
     if (p === '/api/files') { if (!only('GET')) return; return json(200, allFiles()); }
     if (p === '/api/rules') { if (!only('GET')) return; return json(200, { rules: readRules() }); }
@@ -1158,6 +1239,8 @@ const server = http.createServer(async (req, res) => {
       if (!only('POST')) return;
       const b = await body(req);
       if (!str(b.command)) return json(400, { error: T('Пустая команда', 'Empty command') });
+      if (String(b.command).length > 10000) return json(413, { error: T('Слишком длинная команда', 'Command is too long') });
+      if (TERMS.size >= 12) return json(429, { error: T('Уже запущено 12 терминалов — закройте лишние', '12 terminals are already running — close some') });
       return handleTermRun(b, res);
     }
     if (p === '/api/term/input') {
@@ -1223,4 +1306,4 @@ server.on('error', (e) => {
 });
 server.listen(PORT, HOST);
 }
-module.exports = { HttpError, withKeys, keyState, resetKeys, classifyKeyError, safe, setRoot, replaceInFile, applyPatch, run, search, findPaths, parseDdg, htmlToText, isPrivateHost, isPrivateIp, assertPublicUrl, assertProviderUrl, isSecretFile, fetchUrl, openTarget, VERSION };
+module.exports = { HttpError, withKeys, keyState, resetKeys, classifyKeyError, safe, setRoot, replaceInFile, applyPatch, run, search, allFiles, listDir, findPaths, parseDdg, htmlToText, isPrivateHost, isPrivateIp, assertPublicUrl, assertProviderUrl, isSecretFile, fetchUrl, openTarget, VERSION };

@@ -9,3 +9,8 @@ node_modules/
 .env.*.local
 *.pem
 *.key
+# …но открытый ключ лицензий должен попасть в поставку
+!license-pub.pem
+# закрытые ключи лицензий — никогда
+license-keys/
+license-private.pem

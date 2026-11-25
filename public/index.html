@@ -192,6 +192,14 @@
     <div class="row"><span class="hint" id="vState"></span><span class="spacer"></span><button type="button" id="vInstall" data-i18n="v_install">Скачать</button><button type="button" id="vRemove" data-i18n="v_remove">Удалить</button></div>
     <label class="chk"><input type="checkbox" id="fVoiceAuto"> <span data-i18n="f_vauto">Останавливать запись после паузы в речи</span></label>
   </fieldset>
+  <fieldset id="licBox"><legend data-i18n="lic_title">Лицензия</legend>
+    <div class="hint" id="licState"></div>
+    <label class="f"><span data-i18n="lic_idlabel">ID этого компьютера</span><div class="row"><input id="licMachine" readonly spellcheck="false" style="flex:1;min-width:0"><button type="button" id="licCopy" data-i18n="lic_copy">Копировать</button></div></label>
+    <label class="f"><span data-i18n="lic_key">Лицензионный ключ</span><textarea id="licToken" rows="3" spellcheck="false" autocomplete="off" placeholder="LC1.…"></textarea></label>
+    <div class="row"><button type="button" class="primary" id="licActivate" data-i18n="lic_activate">Активировать</button><button type="button" id="licRemove" data-i18n="lic_remove">Удалить ключ</button><span class="spacer"></span><button type="button" id="licHelp" data-i18n="lic_help">Как это работает</button></div>
+    <div class="hint" id="licMsg"></div>
+    <div class="hint" data-i18n="lic_note">Ключ проверяется офлайн по цифровой подписи и не отправляется в интернет. Без ключа после пробного периода остаются доступны редактор, файлы и git; ИИ-функции отключаются. Стили можно менять свободно — они не входят в проверку целостности.</div>
+  </fieldset>
   <div class="row" style="justify-content:flex-end"><button id="setCancel" data-i18n="cancel">Отмена</button><button class="primary" id="setSave" data-i18n="save">Сохранить</button></div>
 </div></div>
 
