@@ -30,7 +30,7 @@ const D = {
   del_q: ['Удалить «{0}»? Это нельзя отменить.', 'Delete “{0}”? This cannot be undone.'],
   m_newfile: ['Новый файл…', 'New file…'], m_newdir: ['Новая папка…', 'New folder…'], m_rename: ['Переименовать…', 'Rename…'], m_delete: ['Удалить', 'Delete'], m_openfolder: ['Открыть папку…', 'Open folder…'],
   searching: ['Поиск…', 'Searching…'], folder_q: ['Путь к папке проекта:', 'Project folder path:'],
-  no_server: ['Нет доступа к серверу. Откройте ссылку с токеном из консоли, где запущен <code>node server.js</code>.', 'No access to the server. Open the link with the token from the console where <code>node server.js</code> is running.'],
+  no_server: ['Нет доступа к серверу. Откройте ссылку с токеном из консоли, где запущен <code>node app/server.js</code>.', 'No access to the server. Open the link with the token from the console where <code>node app/server.js</code> is running.'],
   err_resp: ['Ошибка ответа сервера', 'Bad server response'], err_empty: ['Пустой ответ от модели', 'Empty response from the model'],
   welcome_off: ['Режим «Офлайн»: ИИ работает на этом компьютере через Ollama. Облачный ИИ — переключите «Онлайн» вверху и вставьте API-ключ.', 'Offline mode: the AI runs on this computer via Ollama. For a cloud AI switch to “Online” at the top and paste an API key.'],
   welcome_on: ['Режим «Онлайн»: запросы идут к сервису, выбранному в настройках.', 'Online mode: requests go to the service chosen in Settings.'],
@@ -191,4 +191,120 @@ Object.assign(D, {
   f_wrapcode: ['Переносить длинные строки кода в чате', 'Wrap long code lines in the chat'], f_sound: ['Звук, когда долгий ответ готов', 'Sound when a long answer is ready'],
   f_quicklist: ['Свои быстрые кнопки чата: по одной в строке, «Название | что попросить». Пусто — стандартные. {file} — имя открытого файла', 'Your own quick chat buttons: one per line, “Name | what to ask”. Empty — default ones. {file} — name of the open file'],
   f_export: ['Сохранить настройки в файл', 'Save settings to a file'], f_import: ['Загрузить из файла', 'Load from a file'], f_resetall: ['Сбросить всё', 'Reset everything'],
+});
+
+Object.assign(D, {
+  about_title: ['О программе', 'About'],
+  about_ver: ['Версия: {0}', 'Version: {0}'],
+  about_free: ['Программа бесплатная: ни ключей, ни подписки, ни пробного периода — все функции доступны сразу.', 'The app is free: no keys, no subscription, no trial limits — every feature is available right away.'],
+  about_crack: ['Здесь видно, совпадают ли файлы программы с официальной подписанной сборкой. «Кряки» и чужие сборки часто содержат вирусы: скачивайте LocalCode только с официального источника.', 'This shows whether the program files match the official signed build. “Cracks” and third-party builds often carry malware: download LocalCode only from the official source.'],
+  build_official: ['✔ Официальная сборка, версия {0}. Файлы совпадают с подписью.', '✔ Official build, version {0}. Files match the signature.'],
+  build_unsigned: ['Сборка без подписи (из исходников). Это нормально для разработки.', 'Unsigned build (from source). This is normal for development.'],
+  build_modified: ['⚠ Файлы программы изменены: {0}. Если это не вы — скачайте программу заново с официального источника.', '⚠ Program files were changed: {0}. If that was not you, download the app again from the official source.'],
+  build_tampered: ['⚠ Подпись сборки не сходится: файлы или манифест подделаны. Скачайте программу заново с официального источника.', '⚠ The build signature does not match: files or manifest were forged. Download the app again from the official source.'],
+  build_boot_bad: ['⚠ Внимание: файлы программы изменены ({0}). «Кряки» и чужие сборки часто содержат вирусы — если вы не меняли код, скачайте LocalCode заново с официального источника.', '⚠ Warning: program files were changed ({0}). “Cracks” and third-party builds often contain malware — if you did not edit the code, download LocalCode again from the official source.'],
+  warn_code: ['В коде есть опасные конструкции', 'The code contains dangerous patterns'],
+  warn_code2: ['Ничего не запускайте, пока не поймёте, что делает этот код. Если код написал ИИ, проверьте его вручную.', 'Do not run anything until you understand what the code does. If the AI wrote it, review it by hand.'],
+  // поиск и замена по проекту
+  b_replace: ['Заменить всё', 'Replace all'], s_ph_r: ['Заменить на…', 'Replace with…'],
+  rep_found: ['Найдено: {0} в {1} файл(ах)', 'Found: {0} in {1} file(s)'], rep_none: ['Совпадений нет', 'No matches'],
+  rep_need: ['Введите, что искать', 'Enter what to search for'], rep_long: ['Слишком длинный запрос (до 500 символов)', 'The query is too long (500 characters max)'],
+  rep_confirm: ['Заменить «{0}» на «{1}» во всём проекте? Изменения можно откатить через историю правок.', 'Replace “{0}” with “{1}” across the project? Changes can be rolled back from the edit history.'],
+  rep_work: ['Заменяю…', 'Replacing…'], rep_done: ['Заменено: {0} совпадений в {1} файл(ах)', 'Replaced: {0} matches in {1} file(s)'],
+  // история правок
+  hist_title: ['История правок', 'Edit history'], hist_open: ['История правок', 'Edit history'],
+  hist_note: ['Каждая правка сохраняется, и файл можно вернуть к состоянию до неё. Хранятся последние 300 записей.', 'Every save is recorded and a file can be rolled back. The last 300 entries are kept.'],
+  hist_load: ['Загружаю…', 'Loading…'], hist_for: ['Записи по файлу: {0}', 'Entries for: {0}'], hist_all: ['Все файлы проекта', 'All project files'],
+  hist_empty: ['Записей пока нет — они появятся после первого сохранения.', 'No entries yet — they appear after the first save.'],
+  hist_today: ['сегодня, {0}', 'today, {0}'], hist_created: ['создан', 'created'], h_close: ['Закрыть', 'Close'],
+  hist_openfile: ['Открыть', 'Open'], hist_restore: ['Восстановить', 'Restore'], hist_restored: ['Восстановлено: {0}', 'Restored: {0}'],
+  // окружение и обновления
+  about_env: ['Проверить окружение', 'Check environment'], about_upd: ['Проверить обновления', 'Check for updates'],
+  env_wait: ['Проверяю…', 'Checking…'], env_ver: ['Версия программы', 'App version'], env_portable: ['переносимый режим', 'portable mode'],
+  env_port: ['Порт', 'Port'], env_root: ['Папка проекта', 'Project folder'], env_cfg: ['Настройки', 'Settings'],
+  env_mem: ['Память (свободно / всего)', 'Memory (free / total)'], env_disk: ['Диск (свободно / всего)', 'Disk (free / total)'],
+  env_yes: ['да', 'yes'], env_no: ['нет', 'no'], env_uptime: ['Программа работает', 'Uptime'],
+  upd_wait: ['Проверяю обновления…', 'Checking for updates…'], upd_none: ['Проверить не удалось: {0}', 'Could not check: {0}'],
+  upd_norelease: ['на GitHub пока нет релизов', 'no releases on GitHub yet'],
+  upd_new: ['Доступна версия {0} (у вас {1}) — открыть страницу загрузки', 'Version {0} is available (you have {1}) — open the download page'],
+  upd_latest: ['У вас последняя версия ({0})', 'You have the latest version ({0})'], upd_fail: ['Не удалось проверить обновления: {0}', 'Could not check for updates: {0}'],
+  // ZIP
+  about_zip: ['Скачать проект в ZIP', 'Download project as ZIP'], about_unzip: ['Загрузить ZIP в проект', 'Upload a ZIP into the project'],
+  zip_wait: ['Готовлю архив…', 'Preparing the archive…'], zip_done: ['Архив скачан ({0})', 'Archive downloaded ({0})'],
+  zip_bad: ['Это не файл ZIP', 'This is not a ZIP file'], zip_big: ['Архив больше 25 МБ — не получится', 'The archive is larger than 25 MB'],
+  zip_unzip_wait: ['Загружаю и распаковываю…', 'Uploading and unpacking…'], zip_unzip_done: ['Файлов записано: {0}, пропущено: {1}', 'Files written: {0}, skipped: {1}'],
+  zip_readfail: ['Не удалось прочитать файл', 'Could not read the file'],
+  // шаблоны файлов
+  tpl_nofile: ['Сначала откройте файл', 'Open a file first'], tpl_name: ['Название шаблона:', 'Template name:'], tpl_saved: ['Шаблон сохранён: {0}', 'Template saved: {0}'],
+  tpl_full: ['Хранилище браузера заполнено — шаблон не сохранён', 'Browser storage is full — the template was not saved'],
+  tpl_confirm: ['Вставить шаблон «{0}»? Текущее содержимое файла заменится.', 'Insert template “{0}”? The current file content will be replaced.'],
+  tpl_filename: ['Имя нового файла:', 'New file name:'], tpl_inserted: ['Шаблон вставлен: {0}', 'Template inserted: {0}'],
+  // настройки интерфейса
+  f_notify: ['Уведомление в системе, когда долгий ответ готов', 'Desktop notification when a long answer is ready'],
+  th_auto: ['Как в системе', 'System default'], st_stats: ['{0} стр · {1} симв.', '{0} lines · {1} chars'],
+  find_ph: ['Найти в файле', 'Find in file'], find_none: ['Нет совпадений', 'No matches'], find_cnt: ['{0} из {1}', '{0} of {1}'], find_prev: ['Предыдущее', 'Previous'], find_next: ['Следующее', 'Next'], find_close: ['Закрыть', 'Close'],
+  c_wait: ['Дождитесь окончания ответа', 'Wait for the current answer to finish'], regen_none: ['Нет запроса, который можно повторить', 'There is no request to retry'],
+  ed_same: ['Изменений нет', 'Nothing to change'], ed_needsel: ['Выделите строки для сортировки', 'Select lines to sort'], ed_json_bad: ['JSON с ошибкой:', 'Invalid JSON:'],
+  h_find: ['Найти в файле', 'Find in the file'],  h_dup: ['Дублировать строку', 'Duplicate line'], h_del: ['Удалить строку', 'Delete line'], h_move: ['Переместить строки', 'Move lines'], h_goto: ['Перейти к строке', 'Go to line'],
+});
+/* --- 1.0: полный доступ, управление компьютером, редактор --- */
+Object.assign(D, {
+  sys_btn: ['Компьютер', 'Computer'], sys_title: ['Управление компьютером', 'Computer control'],
+  sys_info: ['Сведения о системе', 'System info'], sys_drives: ['Диски и место', 'Drives and space'],
+  sys_processes: ['Процессы', 'Processes'], sys_windows: ['Открытые окна', 'Open windows'],
+  sys_shot: ['Снимок экрана', 'Screenshot'], sys_clip_get: ['Прочитать буфер обмена', 'Read clipboard'],
+  sys_clip_set: ['Скопировать текст в буфер', 'Copy text to clipboard'], sys_vol_up: ['Громче', 'Volume up'],
+  sys_vol_down: ['Тише', 'Volume down'], sys_mute: ['Выключить звук', 'Mute'], sys_lock: ['Заблокировать экран', 'Lock screen'],
+  sys_sleep: ['Спящий режим', 'Sleep'], sys_shutdown: ['Выключить компьютер', 'Shut down'], sys_restart: ['Перезагрузить компьютер', 'Restart'],
+  sys_desktop: ['Открыть рабочий стол', 'Open desktop'], sys_need_text: ['Введите текст для буфера обмена:', 'Text to copy:'],
+  sys_shutdown_q: ['Выключить компьютер? Несохранённые данные в других программах могут потеряться.', 'Shut down the computer? Unsaved work in other apps may be lost.'],
+  sys_restart_q: ['Перезагрузить компьютер? Несохранённые данные в других программах могут потеряться.', 'Restart the computer? Unsaved work in other apps may be lost.'],
+  full_badge_tip: ['ИИ имеет полный доступ к компьютеру. Отключить можно в настройках.', 'The AI has full access to the computer. Turn it off in Settings.'],
+  f_full: ['Полный доступ к компьютеру (любые папки, диски и программы)', 'Full access to the computer (any folders, drives and apps)'],
+  f_full_note: ['ИИ сможет читать и менять файлы в любых папках, включая системные, и запускать любые программы. Каждое действие по-прежнему можно подтверждать кнопкой. Отключайте, если работаете с чужими файлами.', 'The AI can read and change files anywhere, including system folders, and launch any program. Every action can still require your confirmation. Turn it off when working with someone else’s files.'],
+  full_on: ['Полный доступ включён', 'Full access is on'], full_off: ['Полный доступ выключен — только проект и домашняя папка', 'Full access is off — project and home folder only'],
+  rep_title: ['Найти и заменить в файле', 'Find and replace in file'], rep_ph: ['Заменить на…', 'Replace with…'],
+  rep_one: ['Заменить', 'Replace'], rep_all: ['Всё', 'All'], rep_done: ['Заменено: {0}', 'Replaced: {0}'],
+  rep_none: ['Совпадений нет', 'No matches'], rep_bad: ['Ошибка в выражении', 'Invalid expression'],
+  find_case: ['Учитывать регистр', 'Match case'], find_re: ['Регулярное выражение', 'Regular expression'],
+  ed_format_tip: ['Форматировать JSON', 'Format JSON'], ed_wrap_tip: ['Переносить длинные строки (Alt+Z)', 'Wrap long lines (Alt+Z)'],
+  ed_wrap_on: ['Перенос строк включён', 'Word wrap on'], ed_wrap_off: ['Перенос строк выключен', 'Word wrap off'],
+  ed_save_all: ['Сохранено файлов: {0}', 'Files saved: {0}'], ed_no_file: ['Сначала откройте файл', 'Open a file first'],
+  ed_goto_title: ['Номер строки', 'Line number'], ed_saved_short: ['сохранено', 'saved'], ed_unsaved_short: ['изменено', 'modified'],
+  onboard_title: ['Начните работу', 'Get started'],
+  onboard: ['<b>1.</b> Откройте папку проекта кнопкой с именем проекта вверху.<br><b>2.</b> Слева выберите файл или нажмите <b>Ctrl+P</b>.<br><b>3.</b> Справа напишите задачу — ИИ прочитает файлы и поможет.<br><span class="hint">F1 — все горячие клавиши</span>', '<b>1.</b> Open a project folder using the project button at the top.<br><b>2.</b> Pick a file on the left or press <b>Ctrl+P</b>.<br><b>3.</b> Describe a task on the right — the AI will read files and help.<br><span class="hint">F1 — all shortcuts</span>'],
+  st_full: ['полный доступ', 'full access'], st_limited: ['ограниченный доступ', 'limited access'],
+});
+Object.assign(D, {
+  allow_always: ['Разрешить всегда', 'Always allow'],
+  ed_no_comment: ['В этом языке нет комментариев', 'This language has no comments'],
+  st_sel: ['выбрано: {0}', 'selected: {0}'],
+});
+/* Меньше «ИИ-эстетики»: обычные названия кнопок. */
+Object.assign(D, {
+  b_run: ['Запуск', 'Run'], b_debug: ['Отладка', 'Debug'], b_newfile: ['Новый файл', 'New file'], b_newdir: ['Новая папка', 'New folder'],
+  b_refresh: ['Обновить', 'Refresh'], c_title: ['Ассистент', 'Assistant'], proj: ['Проект', 'Project'], v_mic: ['Голос', 'Voice'],
+});
+Object.assign(D, {
+  onboard_lead: ['Три шага — и можно ставить задачу.', 'Three steps and you can ask for changes.'],
+  ob_s1: ['<b>Откройте папку</b> проекта кнопкой вверху слева.', '<b>Open the project folder</b> with the button at the top left.'],
+  ob_s2: ['Выберите файл <b>слева</b> или нажмите <b>Ctrl+P</b>.', 'Pick a file <b>on the left</b> or press <b>Ctrl+P</b>.'],
+  ob_s3: ['Напишите задачу <b>справа</b> — ассистент прочитает код и предложит правки.', 'Describe a task <b>on the right</b> — the assistant reads the code and proposes edits.'],
+  ob_open: ['Открыть папку', 'Open folder'],
+  ob_help: ['Горячие клавиши (F1)', 'Shortcuts (F1)'],
+  ob_tip: ['Подтверждайте действия ассистента кнопкой «Выполнить»: так вы всегда контролируете изменения.', 'Approve the assistant actions with the Run button — you stay in control.'],
+  h_save_all: ['Сохранить все вкладки', 'Save all tabs'],
+  h_close_tab: ['Закрыть вкладку', 'Close tab'],
+  h_replace: ['Найти и заменить', 'Find and replace'],
+  h_wrap: ['Перенос строк в редакторе', 'Toggle word wrap'],
+});
+Object.assign(D, {
+  g_security: ['Безопасность', 'Security'],
+  f_full: ['Полный доступ к компьютеру (любые папки и диски, команды в любой папке)', 'Full computer access (any folder or drive, commands anywhere)'],
+  f_full_note: ['Файлы с секретами (.env, ключи, .git/config) закрыты всегда, системные каталоги нельзя удалить. Действия, меняющие файлы или систему, всё равно требуют подтверждения.', 'Secret files (.env, keys, .git/config) stay protected and system folders cannot be deleted. Actions that change files or the system still need approval.'],
+});
+Object.assign(D, {
+  edb_find: ['Найти', 'Find'], edb_replace: ['Заменить', 'Replace'], edb_dup: ['Дублировать', 'Duplicate'],
+  edb_comment: ['Комментарий', 'Comment'], edb_format: ['Формат', 'Format'], edb_wrap: ['Перенос', 'Wrap'],
+  edb_goto: ['Строка', 'Line'],
 });

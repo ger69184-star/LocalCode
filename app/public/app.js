@@ -8,18 +8,34 @@ const L2 = (ru, en) => (LANG === 'ru' ? ru : en);   // двуязычные ст
 applyI18n();
 
 /* ================= API ================= */
+// Токен приходит во фрагменте ссылки (#token=…): он не уходит на сервер в адресе и не попадает в Referer.
 const sp = new URLSearchParams(location.search);
-if (sp.get('token')) { sessionStorage.token = sp.get('token'); window.history.replaceState(null, '', '/'); }
+const hp = new URLSearchParams(String(location.hash || '').replace(/^#/, ''));
+const urlToken = hp.get('token') || sp.get('token') || '';
+if (urlToken) {
+  if (/^[a-f0-9]{16,64}$/i.test(urlToken)) sessionStorage.token = urlToken;
+  window.history.replaceState(null, '', '/');
+}
 const TOKEN = sessionStorage.token || '';
 const H = () => ({ 'x-token': TOKEN, 'Content-Type': 'application/json', 'x-lang': LANG });
 async function api(path, opts = {}) {
   const r = await fetch(path, { ...opts, headers: H() });
   const j = await r.json().catch(() => ({ error: tr('err_resp') }));
-  if (!r.ok) throw new Error(j.error || r.statusText);
+  if (!r.ok) {
+    const ew = new Error(j.error || r.statusText);
+    ew.code = j.code; ew.warnings = j.warnings;
+    throw ew;
+  }
   return j;
 }
 const post = (p, d, signal) => api(p, { method: 'POST', body: JSON.stringify(d), signal });
 function toast(t, ms = 2500) { const e = $('#toast'); e.textContent = t; e.hidden = false; clearTimeout(toast.t); toast.t = setTimeout(() => e.hidden = true, ms); }
+/* Код с типичными вирусными приёмами не блокируем, но громко предупреждаем. */
+function flashWarnings(list) {
+  if (!Array.isArray(list) || !list.length) return;
+  addMsg('sys', '<b>⚠ ' + esc(tr('warn_code')) + '</b><br>' + list.map(w => '• ' + esc(w.text)).join('<br>') + '<br>' + esc(tr('warn_code2')));
+  toast(tr('warn_code'), 7000);
+}
 
 /* ================= Конфиг ================= */
 const PRESETS = {
@@ -49,13 +65,42 @@ const PROFILES = {
   strong: { ctxChars: 40000, hist: 30, acDelay: 400, numCtx: 16384 },
 };
 const mkEp = (mode, preset) => { const p = PRESETS[mode][preset]; return { preset, baseUrl: p.baseUrl, model: p.model, kind: p.kind, authPrefix: p.authPrefix, useTools: p.tools, apiKey: '', apiKeys: [] }; };
+/* localStorage мог остаться от старой версии или быть испорченным: приводим настройки к рабочему виду,
+   иначе обращение к cfg.offline.baseUrl на пустом объекте ломает весь интерфейс. */
+function normalizeCfg(c) {
+  const o = (c && typeof c === 'object' && !Array.isArray(c)) ? c : {};
+  o.mode = o.mode === 'online' ? 'online' : 'offline';
+  if (!PROFILES[o.profile]) o.profile = 'normal';
+  o.theme = ['dark', 'light', 'auto'].includes(o.theme) ? o.theme : 'dark';
+  o.lang = o.lang === 'en' ? 'en' : 'ru';
+  for (const m of ['offline', 'online']) {
+    const def = mkEp(m, m === 'offline' ? 'ollama' : 'deepseek');
+    const e = (o[m] && typeof o[m] === 'object' && !Array.isArray(o[m])) ? o[m] : {};
+    const preset = PRESETS[m][e.preset] ? e.preset : def.preset;
+    const p = PRESETS[m][preset];
+    o[m] = {
+      ...def, ...e, preset,
+      baseUrl: typeof e.baseUrl === 'string' ? e.baseUrl : p.baseUrl,
+      model: typeof e.model === 'string' ? e.model : p.model,
+      kind: e.kind === 'anthropic' ? 'anthropic' : 'openai',
+      authPrefix: typeof e.authPrefix === 'string' && e.authPrefix ? e.authPrefix : 'Bearer',
+      useTools: e.useTools === undefined ? !!p.tools : !!e.useTools,
+      apiKey: typeof e.apiKey === 'string' ? e.apiKey : '',
+      apiKeys: Array.isArray(e.apiKeys) ? e.apiKeys.filter(k => typeof k === 'string' && k.trim()).map(k => k.trim()).slice(0, 20) : [],
+    };
+  }
+  if (o.ui && (typeof o.ui !== 'object' || Array.isArray(o.ui))) delete o.ui;
+  return o;
+}
 let cfg = JSON.parse(localStorage.lc_cfg2 || 'null');
+if (cfg) cfg = normalizeCfg(cfg);
 const saveCfg = () => localStorage.lc_cfg2 = JSON.stringify(cfg);
 function initCfg(d) {
   if (cfg) return;
   cfg = { mode: d.mode || 'offline', profile: d.profile || 'normal', autocomplete: !!d.autocomplete, theme: 'dark', lang: LANG, autosave: false, offline: mkEp('offline', 'ollama'), online: mkEp('online', 'deepseek') };
   if (d.model) cfg.offline.model = d.model;
   if (d.useTools != null) cfg.offline.useTools = d.useTools;
+  cfg = normalizeCfg(cfg);
   saveCfg();
 }
 const ep = () => cfg[cfg.mode];
@@ -105,6 +150,7 @@ async function renderTree() {
     for (const it of items) {
       const el = document.createElement('div');
       el.className = 'node' + (it.path === activePath ? ' active' : '');
+      el.dataset.path = it.path;
       el.style.paddingLeft = 8 + depth * 14 + 'px';
       el.innerHTML = `<span class="ic">${it.dir ? (expanded.has(it.path) ? '▾' : '▸') : '·'}</span><span>${esc(it.name)}</span>`;
       el.onclick = () => { if (it.dir) { expanded.has(it.path) ? expanded.delete(it.path) : expanded.add(it.path); renderTree(); } else openFile(it.path); };
@@ -118,6 +164,8 @@ async function renderTree() {
 }
 $('#tree').oncontextmenu = (e) => { e.preventDefault(); nodeMenu(e, null); };
 $('#refresh').onclick = renderTree;
+/* Переключение вкладки не должно заново обходить дерево по сети — достаточно переставить класс. */
+function syncActiveNode() { $$('#tree .node').forEach(el => el.classList.toggle('active', el.dataset.path === activePath)); }
 function showMenu(e, items) {
   const m = $('#menu'); m.innerHTML = '';
   for (const it of items) {
@@ -139,7 +187,14 @@ async function newDir(dir = '') { const n = prompt(tr('new_dir_q')); if (!n) ret
 async function renameNode(it) {
   const n = prompt(tr('rename_q'), it.name); if (!n || n === it.name) return;
   const to = join(it.path.split('/').slice(0, -1).join('/'), n);
-  try { await post('/api/fsop', { op: 'rename', path: it.path, to }); tabs.forEach(t => { if (t.path === it.path) t.path = to; }); if (activePath === it.path) activePath = to; renderTabs(); renderTree(); } catch (e) { toast(e.message); }
+  const moved = (p) => p === it.path ? to : (it.dir && p.startsWith(it.path + '/') ? to + p.slice(it.path.length) : p);
+  try {
+    await post('/api/fsop', { op: 'rename', path: it.path, to });
+    tabs.forEach(t => { t.path = moved(t.path); });
+    [...expanded].forEach(p => { const q = moved(p); if (q !== p) { expanded.delete(p); expanded.add(q); } });
+    activePath = moved(activePath);
+    renderTabs(); renderTree();
+  } catch (e) { toast(e.message); }
 }
 async function deleteNode(it) {
   if (!confirm(tr('del_q', it.path))) return;
@@ -168,6 +223,298 @@ $('#sQ').addEventListener('keydown', async (e) => {
   } catch (er) { box.textContent = er.message; }
 });
 
+/* ================= Замена по всему проекту ================= */
+const sRepNote = (txt) => { $('#sRep').textContent = txt || ''; };
+let repPrevTimer = 0, repPreviewSeq = 0;
+async function previewReplace() {
+  const q = $('#sQ').value, rep = $('#sR').value, isRe = $('#sRegex').checked;
+  const seq = ++repPreviewSeq;
+  clearTimeout(repPrevTimer);
+  if (!q.trim() || q.trim().length < 2) { sRepNote(''); return; }
+  if (q.length > 500) { sRepNote(tr('rep_long')); return; }
+  sRepNote('…');
+  repPrevTimer = setTimeout(async () => {
+    try {
+      const r = await post('/api/replace', { query: q, replacement: rep, regex: isRe, dry: true });
+      if (seq !== repPreviewSeq) return;
+      sRepNote(r.total ? tr('rep_found', (r.partial ? '≥' : '') + r.total, r.filesCount) : tr('rep_none'));
+    } catch (e) { if (seq === repPreviewSeq) sRepNote(e.message); }
+  }, 600);
+}
+$('#sQ').addEventListener('input', previewReplace);
+$('#sRegex').addEventListener('change', previewReplace);
+$('#sReplace').onclick = async () => {
+  const q = $('#sQ').value, rep = $('#sR').value, isRe = $('#sRegex').checked, btn = $('#sReplace');
+  if (!q.trim()) { sRepNote(tr('rep_need')); return; }
+  if (!confirm(tr('rep_confirm', q.length > 60 ? q.slice(0, 60) + '…' : q, rep.length > 60 ? rep.slice(0, 60) + '…' : rep))) return;
+  btn.disabled = true; sRepNote(tr('rep_work'));
+  try {
+    const r = await post('/api/replace', { query: q, replacement: rep, regex: isRe, dry: false });
+    await reloadCleanTabs(); renderTree();
+    sRepNote(tr('rep_done', r.total, r.filesCount));
+    addMsg('sys', '<b>✔ ' + esc(tr('rep_done', r.total, r.filesCount)) + '</b><br>' + r.files.slice(0, 30).map(f => '• ' + esc(f.path) + ' — ' + f.count).join('<br>') + (r.files.length > 30 ? '<br>…' : ''));
+    refreshGitSoon();
+  } catch (e) { sRepNote(e.message); toast(e.message, 6000); }
+  finally { btn.disabled = false; }
+};
+/* Перечитать с диска вкладки без несохранённых правок (после замены/импорта). */
+async function reloadCleanTabs() {
+  let changed = false;
+  for (const t of tabs.slice()) {
+    if (t.dirty) continue;
+    try {
+      const { content } = await api('/api/file?path=' + encodeURIComponent(t.path));
+      if (content !== t.content) { t.content = content; changed = true; if (t.path === activePath) { ed.value = content; render.n = 0; render(); } }
+    } catch { tabs = tabs.filter(x => x !== t); changed = true; if (t.path === activePath) activePath = tabs.length ? tabs[tabs.length - 1].path : null; }
+  }
+  if (changed) { if (!cur()) { ed.value = ''; render.n = 0; render(); } renderTabs(); }
+}
+
+/* ================= История правок ================= */
+const fmtSize = (n) => n >= 1024 * 1024 ? (n / 1024 / 1024).toFixed(1) + L2(' МБ', ' MB') : n >= 1024 ? Math.round(n / 1024) + L2(' КБ', ' KB') : n + L2(' Б', ' B');
+function histTime(ts) {
+  const d = new Date(ts), p = (x) => String(x).padStart(2, '0'), now = new Date();
+  const time = p(d.getHours()) + ':' + p(d.getMinutes());
+  const sameDay = d.toDateString() === now.toDateString();
+  return sameDay ? tr('hist_today', time) : p(d.getDate()) + '.' + p(d.getMonth() + 1) + '.' + d.getFullYear() + ' ' + time;
+}
+async function openHistory() {
+  const p = cur() ? activePath : '';
+  const box = $('#histList'); box.textContent = tr('hist_load');
+  $('#histSub').textContent = p ? tr('hist_for', p) : tr('hist_all');
+  $('#hist').classList.add('open');
+  try {
+    const { items } = await api('/api/history?limit=100' + (p ? '&path=' + encodeURIComponent(p) : ''));
+    box.innerHTML = '';
+    if (!items.length) { box.textContent = tr('hist_empty'); return; }
+    for (const it of items) {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:7px 2px;border-bottom:1px solid var(--line)';
+      const info = document.createElement('div');
+      info.style.cssText = 'flex:1;min-width:0;overflow:hidden';
+      info.innerHTML = '<b style="font-size:12px;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(it.path) + '</b>' +
+        '<span class="hint">' + esc(histTime(it.ts)) + ' · ' + esc(fmtSize(it.size)) + (it.created ? ' · ' + esc(tr('hist_created')) : '') + '</span>';
+      const open = document.createElement('button'); open.className = 'ghost'; open.textContent = tr('hist_openfile');
+      open.onclick = async () => {
+        const t = tabs.find(x => x.path === it.path);
+        if (t && t.dirty && !confirm(tr('unsaved'))) return;
+        closeHistory(); await openFile(it.path, true);
+      };
+      const undo = document.createElement('button'); undo.textContent = tr('hist_restore');
+      undo.onclick = async () => {
+        undo.disabled = true;
+        try {
+          await post('/api/history/restore', { id: it.id });
+          const t = tabs.find(x => x.path === it.path);
+          if (t) t.dirty = false;
+          await reloadCleanTabs(); renderTree();
+          toast(tr('hist_restored', it.path), 3500);
+          closeHistory();
+        } catch (e) { toast(e.message, 5000); undo.disabled = false; }
+      };
+      row.append(info, open, undo);
+      box.appendChild(row);
+    }
+  } catch (e) { box.textContent = e.message; }
+}
+function closeHistory() { $('#hist').classList.remove('open'); }
+$('#histClose').onclick = closeHistory;
+$('#hist').onclick = (e) => { if (e.target.id === 'hist') closeHistory(); };
+
+/* ================= Поиск внутри файла (Ctrl+F) ================= */
+let findHits = [], findIdx = -1;
+function openFind() {
+  if (!cur()) return;
+  const bar = $('#findBar'); bar.style.display = 'flex';
+  const sel = ed.value.slice(ed.selectionStart, ed.selectionEnd);
+  if (sel && !sel.includes('\n') && sel.length < 120) $('#findIn').value = sel;
+  $('#findIn').focus(); $('#findIn').select(); findScan();
+}
+function closeFind() { $('#findBar').style.display = 'none'; findHits = []; findIdx = -1; ed.focus(); }
+let findLens = [];
+function selectHit() {
+  if (!findHits.length) { $('#findCnt').textContent = tr('find_none'); return; }
+  const at = findHits[findIdx], len = findLens[findIdx] || 0;
+  ed.focus(); ed.setSelectionRange(at, at + len);
+  const line = ed.value.slice(0, at).split('\n').length;
+  ed.scrollTop = Math.max(0, (line - 3) * (parseFloat(getComputedStyle(ed).lineHeight) || 20));
+  syncScroll();
+  $('#findCnt').textContent = tr('find_cnt', findIdx + 1, findHits.length);
+}
+/* Одно регулярное выражение и для поиска, и для замены: учитывает регистр, .* и спецсимволы. */
+function findRx() {
+  const q = $('#findIn').value;
+  if (!q) return null;
+  try { return new RegExp($('#findRe').checked ? q : q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g' + ($('#findCase').checked ? '' : 'i')); }
+  catch { return null; }
+}
+function findScan() {
+  findHits = []; findLens = []; findIdx = -1;
+  if (!$('#findIn').value) { $('#findCnt').textContent = ''; return; }
+  const re = findRx();
+  if (!re) { $('#findCnt').textContent = tr('rep_bad'); return; }
+  const v = ed.value; let m;
+  while (findHits.length < 5000 && (m = re.exec(v))) {
+    if (!m[0].length) { re.lastIndex++; continue; }
+    findHits.push(m.index); findLens.push(m[0].length);
+  }
+  if (!findHits.length) { $('#findCnt').textContent = tr('find_none'); return; }
+  const p = ed.selectionStart, near = findHits.findIndex(x => x >= p);
+  findIdx = near < 0 ? 0 : near;
+  selectHit();
+}
+function findReplace(all) {
+  if (!cur()) return toast(tr('ed_no_file'));
+  const re = findRx();
+  if (!re) return toast(tr('rep_bad'));
+  if (re.test('')) return toast(tr('rep_bad'));
+  re.lastIndex = 0;
+  const rep = $('#findRep').value, v = ed.value;
+  let hit = -1, len = 0;
+  if (!all) {
+    if (!findHits.length) findScan();
+    if (!findHits.length) return toast(tr('rep_none'));
+    hit = findHits[findIdx]; len = findLens[findIdx] || 0;
+  }
+  let n = 0;
+  const out = all
+    ? v.replace(re, () => { n++; return rep; })
+    : v.slice(0, hit) + rep + v.slice(hit + len);
+  if (!all) n = 1;
+  if (!n || out === v) return toast(tr('rep_none'));
+  ed.focus(); ed.setSelectionRange(0, v.length); ins(out);
+  findScan();
+  toast(tr('rep_done', n), 1800);
+}
+function findStep(d) {
+  if (!findHits.length) return findScan();
+  findIdx = (findIdx + d + findHits.length) % findHits.length;
+  selectHit();
+}
+$('#findIn').addEventListener('input', findScan);
+$('#findIn').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); findStep(e.shiftKey ? -1 : 1); }
+  else if (e.key === 'Escape') { e.preventDefault(); closeFind(); }
+});
+$('#findNext').onclick = () => findStep(1);
+$('#findPrev').onclick = () => findStep(-1);
+$('#findClose').onclick = closeFind;
+$('#findRepOne').onclick = () => findReplace(false);
+$('#findRepAll').onclick = () => findReplace(true);
+$('#findRep').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); findReplace(!e.shiftKey); } });
+$('#findCase').onchange = findScan; $('#findRe').onchange = findScan;
+
+/* Панель редактора: частые действия без знания горячих клавиш. */
+$('#edFind').onclick = openFind;
+$('#edReplace').onclick = () => { openFind(); $('#findRep').focus(); };
+$('#edDup').onclick = () => duplicateSelection();
+$('#edComment').onclick = () => toggleComment();
+$('#edFormat').onclick = () => formatJson();
+$('#edGoto').onclick = () => { const n = prompt(tr('ed_goto_title')); if (n) goToLine(+n); };
+$('#edWrap').onclick = toggleWrap;
+
+/* ================= Окружение и обновления ================= */
+function envText(e) {
+  const gb = (n) => (n / 1024 / 1024 / 1024).toFixed(1) + L2(' ГБ', ' GB');
+  const lines = [
+    tr('env_ver') + ': ' + e.version + (e.portable ? ' · ' + tr('env_portable') : ''),
+    'Node.js: ' + e.node + ' · ' + e.platform + '/' + e.arch,
+    tr('env_port') + ': ' + e.port,
+    tr('env_root') + ': ' + e.root,
+    tr('env_cfg') + ': ' + e.cfgDir,
+  ];
+  if (e.memory) lines.push(tr('env_mem') + ': ' + gb(e.memory.free) + ' / ' + gb(e.memory.total));
+  if (e.disk) lines.push(tr('env_disk') + ': ' + gb(e.disk.free) + ' / ' + gb(e.disk.total));
+  lines.push('Git: ' + (e.git || tr('env_no')), 'Ollama: ' + (e.ollama ? tr('env_yes') : tr('env_no')),
+    tr('env_uptime') + ': ' + (e.uptime >= 3600 ? Math.round(e.uptime / 3600) + L2(' ч', ' h') : Math.max(1, Math.round(e.uptime / 60)) + L2(' мин', ' min')));
+  $('#envOut').textContent = lines.join('\n');
+}
+$('#envBtn').onclick = async () => {
+  const b = $('#envBtn'); b.disabled = true; $('#envOut').textContent = tr('env_wait');
+  try { envText(await api('/api/env')); } catch (e) { $('#envOut').textContent = e.message; }
+  finally { b.disabled = false; }
+};
+$('#updBtn').onclick = async () => {
+  const b = $('#updBtn'), out = $('#updOut'); b.disabled = true; out.textContent = tr('upd_wait');
+  try {
+    const u = await api('/api/update-check');
+    if (!u.latest) out.textContent = tr('upd_none', u.reason === 'no-releases' ? tr('upd_norelease') : (u.current || ''));
+    else if (u.newer) {
+      out.innerHTML = '';
+      const a = document.createElement('a'); a.href = u.url; a.target = '_blank'; a.rel = 'noopener noreferrer nofollow';
+      a.textContent = tr('upd_new', u.latest, u.current); out.appendChild(a);
+    } else out.textContent = tr('upd_latest', u.current);
+  } catch (e) { out.textContent = tr('upd_fail', e.message); }
+  finally { b.disabled = false; }
+};
+
+/* ================= ZIP: экспорт и импорт проекта ================= */
+const ZIP_MAX = 25 * 1024 * 1024;
+async function exportZip() {
+  const out = $('#zipOut'), b = $('#zipBtn'); b.disabled = true; out.textContent = tr('zip_wait');
+  try {
+    const r = await fetch('/api/export', { headers: H() });
+    if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || r.statusText); }
+    const blob = await r.blob(), a = document.createElement('a');
+    const d = new Date(), p2 = (n) => String(n).padStart(2, '0');
+    a.href = URL.createObjectURL(blob);
+    a.download = (info.name || 'project') + '-' + d.getFullYear() + p2(d.getMonth() + 1) + p2(d.getDate()) + '.zip';
+    document.body.appendChild(a); a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 60000);
+    out.textContent = tr('zip_done', fmtSize(blob.size));
+  } catch (e) { out.textContent = e.message; }
+  finally { b.disabled = false; }
+}
+function importZip(file) {
+  if (!file) return;
+  const out = $('#zipOut');
+  if (!/\.zip$/i.test(file.name)) { out.textContent = tr('zip_bad'); return; }
+  if (file.size > ZIP_MAX) { out.textContent = tr('zip_big'); return; }
+  const b = $('#unzipBtn'); b.disabled = true; out.textContent = tr('zip_unzip_wait');
+  const rd = new FileReader();
+  rd.onload = async () => {
+    try {
+      const b64 = String(rd.result).replace(/^data:[^,]*,/, '');
+      const r = await post('/api/import', { data: b64 });
+      out.textContent = tr('zip_unzip_done', r.saved, r.skipped);
+      await reloadCleanTabs(); renderTree(); refreshGitSoon();
+    } catch (e) { out.textContent = e.message; }
+    finally { b.disabled = false; $('#zipFile').value = ''; }
+  };
+  rd.onerror = () => { out.textContent = tr('zip_readfail'); b.disabled = false; };
+  rd.readAsDataURL(file);
+}
+$('#zipBtn').onclick = exportZip;
+$('#unzipBtn').onclick = () => $('#zipFile').click();
+$('#zipFile').addEventListener('change', (e) => importZip(e.target.files && e.target.files[0]));
+
+/* ================= Шаблоны файлов (локально, без сервера) ================= */
+function templates() { try { const o = JSON.parse(localStorage.lc_tpl || '{}'); return o && typeof o === 'object' ? o : {}; } catch { return {}; } }
+function saveTemplate() {
+  const t = cur();
+  if (!t) return toast(tr('tpl_nofile'));
+  const name = prompt(tr('tpl_name'), t.path.split('/').pop().replace(/\.[^.]+$/, ''));
+  if (!name) return;
+  const all = templates(); all[name] = t.content;
+  try { localStorage.lc_tpl = JSON.stringify(all); toast(tr('tpl_saved', name)); }
+  catch { toast(tr('tpl_full')); }
+}
+async function insertTemplate(name) {
+  const src = templates()[name];
+  if (src == null) return;
+  if (!confirm(tr('tpl_confirm', name))) return;
+  if (cur()) {
+    ed.value = src; cur().content = src; cur().dirty = true; render.n = 0; render(); scheduleAutosave(cur());
+  } else {
+    const p = prompt(tr('tpl_filename'), name + '.txt');
+    if (!p) return;
+    await openFile(p);
+    if (!cur()) return;
+    ed.value = src; cur().content = src; cur().dirty = true; render.n = 0; render();
+  }
+  toast(tr('tpl_inserted', name));
+}
+
 /* ================= Вкладки и редактор ================= */
 function renderTabs() {
   const box = $('#tabs'); box.innerHTML = '';
@@ -178,8 +525,24 @@ function renderTabs() {
     box.appendChild(el);
   }
   $('#empty').hidden = !!tabs.length;
+  $('#edBar').style.display = tabs.length ? 'flex' : 'none';
   $('#stLang').textContent = cur() ? langNow().toUpperCase() : '';
-  if (tabsReady && info.root) { try { localStorage['lc_tabs:' + info.root] = JSON.stringify({ paths: tabs.map(x => x.path), active: activePath }); } catch {} }
+  storeTabsSoon();
+}
+let tabsStoreTimer = 0;
+function storeTabsSoon() {
+  clearTimeout(tabsStoreTimer);
+  tabsStoreTimer = setTimeout(() => {
+    if (tabsReady && info.root) { try { localStorage['lc_tabs:' + info.root] = JSON.stringify({ paths: tabs.map(x => x.path), active: activePath }); } catch {} }
+  }, 300);
+}
+/* Точка «изменено» без перерисовки всех вкладок на каждое нажатие клавиши. */
+function markDirty(t) {
+  if (!t || t.dirty) return;
+  t.dirty = true;
+  const el = Array.from($('#tabs').children || []).find(x => x.title === t.path);
+  const x = el && el.querySelector('.x');
+  if (x) { const d = document.createElement('span'); d.className = 'dot'; d.textContent = '●'; el.insertBefore(d, x); }
 }
 let tabsReady = false;
 let rrId = 0;
@@ -200,9 +563,11 @@ function render() {
 function activate(p) {
   const prevT = cur(); if (cfg.autosave && prevT && prevT.dirty && prevT.path !== p) saveTab(prevT, true);
   activePath = p; clearGhost(); hideInline();
-  const t = cur(); ed.value = t ? t.content : ''; render.n = 0; render(); renderTabs(); renderTree(); syncScroll(); updateStatus();
+  const t = cur(); ed.value = t ? t.content : ''; render.n = 0; render(); renderTabs(); syncActiveNode(); syncScroll(); updateStatus();
   if (t) { ed.scrollTop = t.scroll || 0; syncScroll(); }
 }
+function pushRecent(f) { try { const a = JSON.parse(localStorage['lc_recent'] || '[]').filter(x => x !== f); a.unshift(f); localStorage['lc_recent'] = JSON.stringify(a.slice(0, 20)); } catch {} }
+function recentFiles() { try { return JSON.parse(localStorage['lc_recent'] || '[]'); } catch { return []; } }
 async function openFile(p, force) {
   let t = tabs.find(x => x.path === p);
   if (!t || force) {
@@ -212,7 +577,7 @@ async function openFile(p, force) {
     } catch (e) { toast(tr('cant_open', p, e.message)); return; }
   }
   const prev = cur(); if (prev) prev.scroll = ed.scrollTop;
-  activate(p);
+  activate(p); pushRecent(p);
 }
 function closeTab(p) {
   const t = tabs.find(x => x.path === p);
@@ -222,36 +587,132 @@ function closeTab(p) {
 }
 async function saveTab(t, quiet) {
   const snap = t.content;
-  try { await post('/api/file', { path: t.path, content: snap }); if (t.content === snap) t.dirty = false; renderTabs(); if (!quiet) toast(tr('saved'), 900); refreshGitSoon(); }
+  try { const r = await post('/api/file', { path: t.path, content: snap }); if (r.warnings) flashWarnings(r.warnings); if (t.content === snap) t.dirty = false; renderTabs(); if (!quiet) toast(tr('saved'), 900); refreshGitSoon(); }
   catch (e) { toast(e.message); }
 }
 function save() { const t = cur(); if (t) return saveTab(t, false); }
 let asTimer = 0;
 function scheduleAutosave(t) { if (!cfg.autosave || !t) return; clearTimeout(asTimer); asTimer = setTimeout(() => { if (t.dirty && tabs.includes(t)) saveTab(t, true); }, uiCfg().asMs || 1000); }
-function syncScroll() { hl.style.transform = `translate(${-ed.scrollLeft}px,${-ed.scrollTop}px)`; $('#gutIn').style.transform = `translateY(${-ed.scrollTop + 0}px)`; }
-ed.addEventListener('scroll', syncScroll);
-ed.addEventListener('input', () => { const t = cur(); if (t) { t.content = ed.value; t.dirty = true; renderTabs(); scheduleAutosave(t); } clearGhost(true); scheduleRender(); scheduleAC(); });
+function syncScroll() { hl.style.transform = `translate(${-ed.scrollLeft}px,${-ed.scrollTop}px)`; $('#gutIn').style.transform = `translateY(${-ed.scrollTop + 0}px)`;  syncWrapWidth(); }
+ed.addEventListener('scroll', () => { syncScroll(); updateCurLine(); });
+ed.addEventListener('input', () => {
+  const t = cur();
+  if (t) { t.content = ed.value; markDirty(t); scheduleAutosave(t); }
+  clearGhost(true); scheduleRender(); scheduleAC();
+});
 function goToLine(n) {
   const lines = ed.value.split('\n'); n = Math.max(1, Math.min(n, lines.length));
   const off = lines.slice(0, n - 1).reduce((a, l) => a + l.length + 1, 0);
   ed.focus(); ed.setSelectionRange(off, off + lines[n - 1].length); ed.scrollTop = Math.max(0, (n - 1) * (parseFloat(getComputedStyle(ed).lineHeight) || 20) - 120); syncScroll();
 }
+let stFrame = 0;
 function updateStatus() {
-  const p = ed.selectionStart, b = ed.value.slice(0, p), ln = b.split('\n');
-  $('#stPos').textContent = cur() ? tr('st_pos', ln.length, ln[ln.length - 1].length + 1) : '';
+  if (stFrame) return;
+  stFrame = requestAnimationFrame(() => {
+    stFrame = 0;
+    if (!cur()) { $('#stPos').textContent = ''; return; }
+    const v = ed.value, p = ed.selectionStart, q = ed.selectionEnd, b = v.slice(0, p), ln = b.split('\n');
+    let total = ln.length;
+    if (p < v.length) total += v.slice(p).split('\n').length - 1;
+    const eol = v.includes('\r\n') ? 'CRLF' : 'LF', sel = q > p ? ' · ' + tr('st_sel', q - p) : '';
+    $('#stPos').textContent = tr('st_pos', ln.length, ln[ln.length - 1].length + 1) + ' · ' + tr('st_stats', total, v.length) + sel + ' · ' + eol + ' · UTF-8';
+    updateCurLine();
+  });
 }
-document.addEventListener('selectionchange', () => { if (document.activeElement === ed) { updateStatus(); if (ghost && ed.selectionStart !== ghost.pos) clearGhost(); } });
+document.addEventListener('selectionchange', () => { if (document.activeElement === ed) { updateStatus(); updateCurLine(); if (ghost && ed.selectionStart !== ghost.pos) clearGhost(); } });
 
 /* ---- редактирование: отступы, пары, комментарии ---- */
 const ins = (t) => document.execCommand('insertText', false, t);
 const CLOSE = { '(': ')', '[': ']', '{': '}', '"': '"', "'": "'", '`': '`' };
 function lineRange() { const v = ed.value; const s = v.lastIndexOf('\n', ed.selectionStart - 1) + 1; let e = v.indexOf('\n', ed.selectionEnd); if (e < 0) e = v.length; return [s, e]; }
 function replaceLines(fn) { const [s, e] = lineRange(); const out = fn(ed.value.slice(s, e).split('\n')).join('\n'); ed.setSelectionRange(s, e); ins(out); ed.setSelectionRange(s, s + out.length); }
+function toggleComment() {
+  const c = HL.commentOf(langNow()); if (!c) return toast(tr('ed_no_comment'));
+  replaceLines(ls => { const all = ls.every(l => !l.trim() || l.trimStart().startsWith(c.trim())); return ls.map(l => !l.trim() ? l : all ? l.replace(c.trim() + ' ', '').replace(c.trim(), '') : l.replace(/^(\s*)/, '$1' + c)); });
+}
+function toggleWrap() {
+  const u = uiCfg(); u.wrap = !u.wrap; cfg.ui = { ...(cfg.ui || {}), ...u }; saveCfg(); applyUi();
+  toast(tr(u.wrap ? 'ed_wrap_on' : 'ed_wrap_off'), 1500);
+}
+function applyWrap() {
+  const on = !!(uiCfg().wrap);
+  $('#editorWrap').classList.toggle('wrap', on);
+  ed.wrap = on ? 'soft' : 'off';
+  $('#edWrap').classList.toggle('on', on);
+  syncWrapWidth();
+  requestAnimationFrame(syncWrapWidth);
+}
+/* При переносе строк ширина подсветки должна совпадать с областью текста (без полосы прокрутки). */
+function syncWrapWidth() {
+  const h = $('#hl'); if (!h) return;
+  if (!uiCfg().wrap) { h.style.width = ''; return; }
+  const w = ed.clientWidth; if (w > 0) h.style.width = w + 'px';
+}
+function saveAll() {
+  const ds = tabs.filter(x => x.dirty); if (!ds.length) return toast(tr('ed_saved_short'));
+  Promise.all(ds.map(x => saveTab(x, true))).then(() => toast(tr('ed_save_all', ds.length)));
+}
+function updateCurLine() {
+  const box = $('#curLine'); if (!box) return;
+  if (!cur() || uiCfg().wrap || ed.selectionStart !== ed.selectionEnd) { box.style.display = 'none'; return; }
+  const v = ed.value, p = ed.selectionStart, line = v.slice(0, p).split('\n').length - 1;
+  const lh = parseFloat(getComputedStyle(ed).lineHeight) || 20;
+  const top = 10 + line * lh - ed.scrollTop;
+  if (top < 0 || top > ed.clientHeight - lh) { box.style.display = 'none'; return; }
+  box.style.display = 'block'; box.style.top = top + 'px'; box.style.height = lh + 'px';
+}
+/* ---- операции над строками: дублирование, удаление, перенос ---- */
+function duplicateSelection() {
+  const a = ed.selectionStart, b = ed.selectionEnd, v = ed.value;
+  if (a !== b) { ed.setSelectionRange(a, b); ins(v.slice(a, b)); ed.setSelectionRange(b, b + (b - a)); return; }
+  const [s, e] = lineRange();
+  ed.setSelectionRange(e, e); ins('\n' + v.slice(s, e));
+}
+function deleteLine() {
+  const v = ed.value, [s, e] = lineRange();
+  ed.setSelectionRange(s, e < v.length ? e + 1 : e); ins('');
+}
+function moveLines(dir) {
+  const v = ed.value, [s, e] = lineRange(), block = v.slice(s, e);
+  if (dir < 0) {
+    if (s === 0) return;
+    const ps = v.lastIndexOf('\n', s - 2) + 1, prev = v.slice(ps, s - 1);
+    ed.setSelectionRange(ps, e); ins(block + '\n' + prev);
+    ed.setSelectionRange(ps, ps + block.length);
+  } else {
+    if (e >= v.length) return;
+    const ne = v.indexOf('\n', e + 1), end = ne < 0 ? v.length : ne, next = v.slice(e + 1, end);
+    ed.setSelectionRange(s, end); ins(next + '\n' + block);
+    ed.setSelectionRange(s + next.length + 1, s + next.length + 1 + block.length);
+  }
+}
+function editWhole(fn) {
+  const v = ed.value;
+  let out; try { out = fn(v); } catch (e) { return toast(e.message, 5000); }
+  if (out === v) return toast(tr('ed_same'), 1500);
+  ed.setSelectionRange(0, v.length); ins(out);
+}
+const sortSelected = () => editWhole(v => {
+  const [s, e] = lineRange(), block = v.slice(s, e);
+  if (!block.trim()) throw new Error(tr('ed_needsel'));
+  return v.slice(0, s) + block.split('\n').sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' })).join('\n') + v.slice(e);
+});
+const trimTrailing = () => editWhole(v => v.split('\n').map(l => l.replace(/[ \t]+$/, '')).join('\n'));
+const formatJson = () => editWhole(v => {
+  let o; try { o = JSON.parse(v); } catch (e) { throw new Error(tr('ed_json_bad') + ' ' + e.message); }
+  return JSON.stringify(o, null, 2) + (v.endsWith('\n') ? '\n' : '');
+});
 ed.addEventListener('keydown', (e) => {
   if (ghost && e.key === 'Tab') { e.preventDefault(); acceptGhost(); return; }
   if (e.key === 'Escape' && ghost) { clearGhost(); return; }
   const mod = e.ctrlKey || e.metaKey;
-  if (mod && e.key === '/') { e.preventDefault(); const c = HL.commentOf(langNow()); if (!c) return; replaceLines(ls => { const all = ls.every(l => !l.trim() || l.trimStart().startsWith(c.trim())); return ls.map(l => !l.trim() ? l : all ? l.replace(c.trim() + ' ', '').replace(c.trim(), '') : l.replace(/^(\s*)/, '$1' + c)); }); return; }
+  if (mod && e.shiftKey && (e.key === 'K' || e.key === 'k')) { e.preventDefault(); deleteLine(); return; }
+  if (mod && !e.shiftKey && (e.key === 'd' || e.key === 'D')) { e.preventDefault(); duplicateSelection(); return; }
+  if (e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) { e.preventDefault(); moveLines(e.key === 'ArrowUp' ? -1 : 1); return; }
+  if (mod && !e.shiftKey && (e.key === 'f' || e.key === 'F')) { e.preventDefault(); openFind(); return; }
+  if (mod && e.key === '/') { e.preventDefault(); toggleComment(); return; }
+  if (mod && (e.key === 'h' || e.key === 'H')) { e.preventDefault(); openFind(); $('#findRep').focus(); return; }
+  if (e.altKey && (e.key === 'z' || e.key === 'Z')) { e.preventDefault(); toggleWrap(); return; }
   if (e.key === 'Tab') { e.preventDefault(); if (ed.selectionStart === ed.selectionEnd && !e.shiftKey) ins(IND()); else replaceLines(ls => ls.map(l => e.shiftKey ? l.replace(new RegExp('^( {1,' + IND().length + '}|\\t)'), '') : IND() + l)); return; }
   if (e.key === 'Enter' && !mod && !e.shiftKey && ed.selectionStart === ed.selectionEnd) {
     const v = ed.value, p = ed.selectionStart, ls = v.lastIndexOf('\n', p - 1) + 1, line = v.slice(ls, p), ind = line.match(/^\s*/)[0];
@@ -334,10 +795,11 @@ $('#inlInput').addEventListener('keydown', async (e) => {
   if (e.key === 'Escape') { hideInline(); ed.focus(); return; }
   if (e.key !== 'Enter' || !e.target.value.trim() || !inl) return;
   const v = ed.value, sel = v.slice(inl.s, inl.e);
+  const selForModel = sel.slice(0, P().ctxChars);
   const ctx = P().ctxChars / 2;
   const msgs = [
     { role: 'system', content: 'You are a code editor. Return ONLY the new code that replaces the selected fragment (or is inserted at the cursor if the selection is empty) — no explanations and no markdown fences. Keep the indentation and style of the file.' },
-    { role: 'user', content: `File: ${cur().path}\n\nCode before:\n${v.slice(Math.max(0, inl.s - ctx), inl.s)}\n\n<SELECTED>\n${sel}\n</SELECTED>\n\nCode after:\n${v.slice(inl.e, inl.e + ctx / 2)}\n\nTask (the user may write in any language): ${e.target.value.trim()}` }];
+    { role: 'user', content: `File: ${cur().path}\n\nCode before:\n${v.slice(Math.max(0, inl.s - ctx), inl.s)}\n\n<SELECTED>\n${selForModel}\n</SELECTED>\n\nCode after:\n${v.slice(inl.e, inl.e + ctx / 2)}\n\nTask (the user may write in any language): ${e.target.value.trim()}` }];
   $('#inlPrev').hidden = false; $('#inlOut').innerHTML = ''; $('#inlState').textContent = tr('i_wait'); $('#inlOk').disabled = true;
   inlCtl = new AbortController(); let acc = '';
   try {
@@ -350,15 +812,18 @@ $('#inlOk').onclick = () => { if (!inl) return; const r = inl; hideInline(); ed.
 $('#inlNo').onclick = () => { hideInline(); ed.focus(); };
 
 /* ================= Терминал ================= */
-let termCwd = '', termProc = 0, termLast = { code: 0, out: '' };
+let termCwd = '', termProc = 0, termLast = { code: 0, out: '' }, termChars = 0;
+function clearTerm() { $('#termOut').textContent = ''; termChars = 0; }
 function termPrint(s, cls) {
   const o = $('#termOut'); if (!s) return;
   const sp = document.createElement('span'); if (cls) sp.className = cls; sp.textContent = s; o.appendChild(sp);
-  while (o.childNodes.length > 1500) o.removeChild(o.firstChild);
+  termChars += s.length;
+  /* Ограничиваем и число узлов, и объём текста: долгий вывод не съест память вкладки. */
+  while (o.firstChild && (o.childNodes.length > 1500 || termChars > 400000)) { termChars -= (o.firstChild.textContent || '').length; o.removeChild(o.firstChild); }
   o.scrollTop = o.scrollHeight;
 }
 function toggleTerm(force) { const show = force ?? $('#term').hidden; $('#term').hidden = !show; $('#splitT').hidden = !show; if (show) $('#cmd').focus(); }
-$('#termBtn').onclick = () => toggleTerm(); $('#clearTerm').onclick = () => { $('#termOut').textContent = ''; };
+$('#termBtn').onclick = () => toggleTerm(); $('#clearTerm').onclick = () => clearTerm();
 function setTermBusy(b) {
   $('#termStop').hidden = !b; $('#cmd').placeholder = b ? L2('ввод для программы и Enter (Ctrl+C — остановить)', 'input for the program and Enter (Ctrl+C stops)') : tr('t_ph');
   $('#termIn span').textContent = b ? '⏵' : ($('#termShell').value === 'powershell' ? 'PS>' : '$');
@@ -376,8 +841,9 @@ async function termRun(command) {
         const line = buf.slice(0, i); buf = buf.slice(i + 1); if (!line) continue;
         const o = JSON.parse(line);
         if (o.t === 'start') { termProc = o.id; termCwd = o.cwd; $('#cwd').textContent = o.cwd; }
-        else if (o.t === 'out') { termPrint(o.v); out += o.v; }
-        else if (o.t === 'err') { termPrint(o.v, 'te'); out += o.v; }
+        else if (o.t === 'out') { termPrint(o.v); if (out.length < 400000) out += o.v; }
+        else if (o.t === 'err') { termPrint(o.v, 'te'); if (out.length < 400000) out += o.v; }
+        else if (o.t === 'warn') { termPrint(o.v, 'te'); toast(L2('⚠ В команде есть опасные конструкции', '⚠ The command contains dangerous patterns'), 5000); }
         else if (o.t === 'cwd') { termCwd = o.v; $('#cwd').textContent = o.v; }
         else if (o.t === 'exit') code = o.code;
       }
@@ -405,7 +871,7 @@ $('#cmd').addEventListener('keydown', async (e) => {
   const c = e.target.value; e.target.value = '';
   if (termProc) { termPrint(c + '\n', 'tx'); post('/api/term/input', { id: termProc, data: c + '\n' }).catch(() => {}); return; }
   if (!c.trim()) return;
-  if (/^(cls|clear)$/i.test(c.trim())) { $('#termOut').textContent = ''; return; }
+  if (/^(cls|clear)$/i.test(c.trim())) { clearTerm(); return; }
   cmdHist.push(c); cmdI = cmdHist.length; termPrint('$ ' + c + '\n', 'tc');
   termRun(c);
 });
@@ -442,25 +908,28 @@ const TOOLS = [
   fn('write_file', 'Create a file or overwrite it completely.', { path: { type: 'string' }, content: { type: 'string' } }, ['path', 'content']),
   fn('replace_in_file', 'Replace a unique fragment in a file (preferred for small edits).', { path: { type: 'string' }, old_str: { type: 'string' }, new_str: { type: 'string' } }, ['path', 'old_str', 'new_str']),
   fn('search', 'Case-insensitive text search across project files.', { query: { type: 'string' }, path: { type: 'string' } }, ['query']),
-  fn('run_command', 'Run a shell command (tests, build, git, file sorting, app installs, network tools). Starts in the project root but can work anywhere on the computer. Non-interactive only.', { command: { type: 'string' }, timeout: { type: 'number' }, shell: { type: 'string', description: 'cmd (default) or powershell' } }, ['command']),
-  fn('open', 'Open a web page (http/https URL) in the default browser, or a file/folder (music, video, document) in its default app. Relative paths are inside the project.', { target: { type: 'string' } }, ['target']),
+  fn('run_command', 'Run a shell command (tests, build, git, file sorting, app installs, network tools). Starts in the project root; use cwd to run anywhere on the computer. Non-interactive only.', { command: { type: 'string' }, timeout: { type: 'number' }, shell: { type: 'string', description: 'cmd (default) or powershell' }, cwd: { type: 'string', description: 'working folder (absolute path or ~/...)' } }, ['command']),
+  fn('open', 'Open a web page (http/https URL) in the default browser, or any file/folder/program in its default app. Relative paths are inside the project.', { target: { type: 'string' } }, ['target']),
+  fn('system', 'Control the computer: info, drives, processes, windows, screenshot, clipboard_get, clipboard_set, volume_up, volume_down, mute, lock, sleep, shutdown, restart, kill. Use run_command for anything else.', { action: { type: 'string' }, pid: { type: 'number' }, text: { type: 'string' }, confirm: { type: 'boolean' } }, ['action']),
 ];
+const allowedTools = new Set();   // «Разрешить всегда» для этого инструмента до перезагрузки окна
 function fn(name, description, props, required) { return { type: 'function', function: { name, description, parameters: { type: 'object', properties: props, required } } }; }
-const NEEDS_OK = new Set(['write_file', 'replace_in_file', 'apply_patch', 'run_command', 'open', 'delete_path']);
-const needsOk = (n, a) => NEEDS_OK.has(n) || (n === 'bluetooth' && /^(on|off)$/i.test((a && a.action) || ''));
-let chatHist = [], busy = false, stopFlag = false, chatCtl = null, pendingAsk = null;
+// Поиск в интернете и чтение ссылок передают данные наружу — тоже только с подтверждением.
+const NEEDS_OK = new Set(['write_file', 'replace_in_file', 'apply_patch', 'run_command', 'open', 'delete_path', 'web_search', 'fetch_url', 'system', 'bluetooth']);
+const needsOk = (n, a) => NEEDS_OK.has(n) && !(n === 'system' && /^(info|drives|disks|processes|tasks|windows)$/i.test((a && a.action) || '')) && !(n === 'bluetooth' && /^(status|devices|list)$/i.test((a && a.action) || ''));
+let chatHist = [], busy = false, stopFlag = false, chatCtl = null, pendingAsk = null, chatGen = 0;
 
 function useTools() { return ep().useTools && $('#chatMode').value === 'agent'; }
 function systemPrompt(tools, textAgent) {
   let s = L2(`Ты — ИИ-ассистент программиста в редакторе LocalCode. Проект: «${info.name}» (${info.platform}). Отвечай на языке пользователя, кратко и по делу. `,
     `You are a programming assistant inside the LocalCode editor. Project: "${info.name}" (${info.platform}). Reply in the user's language, briefly and to the point. `);
   s += tools
-    ? L2('Есть инструменты для чтения, поиска и правки файлов и запуска команд. Перед правкой читай файл, вноси минимальные изменения, после правок проверяй их (тесты/сборка), если это возможно.',
-        'You have tools to read, search and edit files and run commands. Read a file before editing it, make minimal changes, and verify them (tests/build) when possible.')
+    ? L2('Есть инструменты для чтения, поиска и правки файлов, запуска команд и управления компьютером. Перед правкой читай файл, вноси минимальные изменения, после правок проверяй их (тесты/сборка), если это возможно.',
+        'You have tools to read, search and edit files, run commands and control the computer. Read a file before editing it, make minimal changes, and verify them (tests/build) when possible.')
     : textAgent ? textToolsPrompt() : L2('Инструментов нет. Если нужно создать или изменить файл — выведи ПОЛНЫЙ новый код в блоке с путём: ```язык:путь/к/файлу (например ```js:src/app.js). Тогда у пользователя появится кнопка «Записать». Простые вопросы объясняй текстом.',
         'You have no tools. To create or change a file, output the FULL new code in a block with a path: ```lang:path/to/file (for example ```js:src/app.js). The user then gets a "Write" button. Answer simple questions in plain text.');
-  if (tools || textAgent) s += L2(`\n\nТы можешь управлять компьютером пользователя (${info.platform}, домашняя папка: ${info.home || '?'}): open — открыть сайт, файл, папку или трек в программе по умолчанию; run_command — сортировка и перенос файлов и ярлыков, установка программ (${info.platform === 'win32' ? 'winget' : info.platform === 'darwin' ? 'brew' : 'apt/dnf/pacman'}), сеть и подключение к другим устройствам (ping, ssh и т. п.). Перед массовыми операциями с файлами сначала посмотри содержимое и коротко скажи, что собираешься сделать; предпочитай перенос удалению; ничего не удаляй, если об этом не просили прямо. Каждое такое действие пользователь подтверждает кнопкой.`,
-    `\n\nYou can control the user's computer (${info.platform}, home folder: ${info.home || '?'}): open — open a website, file, folder or track in the default app; run_command — sort and move files and shortcuts, install programs (${info.platform === 'win32' ? 'winget' : info.platform === 'darwin' ? 'brew' : 'apt/dnf/pacman'}), network tasks and connecting to other devices (ping, ssh, etc.). Before bulk file operations, look at the contents first and briefly say what you are going to do; prefer moving over deleting; never delete anything unless explicitly asked. The user confirms each such action with a button.`);
+  if (tools || textAgent) s += L2(`\n\nТы можешь управлять компьютером пользователя (${info.platform}, домашняя папка: ${info.home || '?'}, рабочий стол: ${info.desktop || '?'}). ${info.fullAccess ? 'ВКЛЮЧЁН ПОЛНЫЙ ДОСТУП: доступны любые папки и диски, кроме файлов с секретами; удалять системные каталоги нельзя (осторожно!).' : 'Доступ ограничен проектом и домашней папкой.'} open — открыть сайт, файл, папку или программу; run_command — любые команды, установка программ (${info.platform === 'win32' ? 'winget' : info.platform === 'darwin' ? 'brew' : 'apt/dnf/pacman'}), сеть, ssh; cwd задаёт рабочую папку. system — сведения о системе, диски, процессы, окна, снимок экрана, буфер обмена, звук, блокировка, сон, выключение и перезагрузка (для shutdown/restart передай confirm:true). Перед массовыми операциями с файлами сначала посмотри содержимое и коротко скажи, что собираешься сделать; предпочитай перенос удалению; ничего не удаляй, если об этом не просили прямо. Каждое действие пользователь подтверждает кнопкой.`,
+    `\n\nYou can control the user's computer (${info.platform}, home folder: ${info.home || '?'}, desktop: ${info.desktop || '?'}). ${info.fullAccess ? 'FULL ACCESS IS ON: every folder and drive is available except secret files; system folders cannot be deleted (be careful!).' : 'Access is limited to the project and the home folder.'} open — open a website, file, folder or program; run_command — any commands, install programs (${info.platform === 'win32' ? 'winget' : info.platform === 'darwin' ? 'brew' : 'apt/dnf/pacman'}), network tasks, ssh; cwd sets the working folder. system — system info, drives, processes, windows, screenshot, clipboard, volume, lock, sleep, shutdown and restart (pass confirm:true for shutdown/restart). Before bulk file operations, look at the contents first and briefly say what you are going to do; prefer moving over deleting; never delete anything unless explicitly asked. The user confirms each action with a button.`);
   if ((cfg.sysPrompt || '').trim()) s += L2('\n\nПостоянные инструкции пользователя (всегда соблюдай):\n', '\n\nStanding instructions from the user (always follow):\n') + cfg.sysPrompt.trim().slice(0, 4000);
   if (rules) s += L2('\n\nПравила проекта:\n', '\n\nProject rules:\n') + rules.slice(0, P().ctxChars / 3);
   return s;
@@ -499,12 +968,12 @@ $('#log').addEventListener('click', async (e) => {
 });
 
 function askApproval(name, args) {
-  if ($('#auto').checked || !needsOk(name, args)) return Promise.resolve(true);
+  if (allowedTools.has(name) || $('#auto').checked || !needsOk(name, args)) return Promise.resolve(true);
   return new Promise((resolve) => {
-    const detail = name === 'apply_patch' ? esc(args.path + '\n\n' + args.patch) : name === 'delete_path' ? esc(args.path + '\n' + L2('(будет перенесено в корзину)', '(goes to the Recycle Bin)')) : name === 'bluetooth' ? esc('Bluetooth: ' + args.action) : name === 'run_command' ? esc(args.command) : name === 'open' ? esc(args.target) : name === 'write_file' ? esc(`${args.path}\n\n${(args.content || '').slice(0, 4000)}`) : `${esc(args.path)}\n\n${diffHtml(args.old_str || '', args.new_str || '')}`;
-    const d = addMsg('ask', `<b>${esc(tr('ask_allow', name))}</b><pre>${detail}</pre><div class="row"><button class="primary" data-a="1">${esc(tr('allow'))}</button><button data-a="0">${esc(tr('deny'))}</button></div>`);
-    pendingAsk = (v) => { d.remove(); pendingAsk = null; resolve(v); };
-    d.querySelectorAll('button[data-a]').forEach(b => b.onclick = () => pendingAsk(b.dataset.a === '1'));
+    const detail = name === 'apply_patch' ? esc(args.path + '\n\n' + args.patch) : name === 'delete_path' ? esc(args.path + '\n' + L2('(будет перенесено в корзину)', '(goes to the Recycle Bin)')) : name === 'bluetooth' ? esc('Bluetooth: ' + args.action) : name === 'system' ? esc('system: ' + args.action + (args.pid ? ' · PID ' + args.pid : '') + (args.text ? '\n' + args.text : '')) : name === 'run_command' ? esc(args.command) : name === 'open' ? esc(args.target) : name === 'fetch_url' ? esc(args.url) : name === 'web_search' ? esc(args.query) : name === 'write_file' ? esc(`${args.path}\n\n${(args.content || '').slice(0, 4000)}`) : `${esc(args.path)}\n\n${diffHtml(args.old_str || '', args.new_str || '')}`;
+    const d = addMsg('ask', `<b>${esc(tr('ask_allow', name))}</b><pre>${detail}</pre><div class="row"><button class="primary" data-a="1">${esc(tr('allow'))}</button><button data-a="always">${esc(tr('allow_always'))}</button><button data-a="0">${esc(tr('deny'))}</button></div>`);
+    pendingAsk = (v) => { d.remove(); pendingAsk = null; if (v === 'always') { allowedTools.add(name); v = true; } resolve(v === true); };
+    d.querySelectorAll('button[data-a]').forEach(b => b.onclick = () => pendingAsk(b.dataset.a === 'always' ? 'always' : b.dataset.a === '1'));
   });
 }
 async function saveCodeAsFile(code, path, lang) {
@@ -533,8 +1002,9 @@ async function runTool(call) {
   if (!(await askApproval(name, args))) { body.innerHTML = '<pre>' + esc(tr('denied')) + '</pre>'; return 'The user declined the action.'; }
   try {
     const r = await post('/api/tool', { name, args }, chatCtl && chatCtl.signal);
+    if (r.warnings) flashWarnings(r.warnings);
     if (name === 'write_file' || name === 'replace_in_file' || name === 'apply_patch') {
-      const before = r.before, after = name === 'write_file' ? args.content : null;
+      const before = r.before;
       body.innerHTML = `<pre>${name === 'write_file' ? diffHtml(before ?? '', args.content) : name === 'apply_patch' ? patchHtml(args.patch) : diffHtml(args.old_str, args.new_str)}</pre><div class="bar"><button>${esc(tr('revert'))}</button><span>${before === null ? esc(tr('new_file_tag')) : ''}</span></div>`;
       body.querySelector('button').onclick = async (ev) => {
         try { if (before === null) await post('/api/fsop', { op: 'delete', path: args.path }); else await post('/api/file', { path: args.path, content: before });
@@ -542,7 +1012,7 @@ async function runTool(call) {
       };
       const inProj = !/^(~|[a-zA-Z]:[\\/]|[\\/])/.test(args.path), open = tabs.find(t => t.path === args.path);
       if (inProj) { if (open && !open.dirty) await openFile(args.path, true); else if (!open) await openFile(args.path); }
-      renderTree(); refreshGitSoon(); void after;
+      renderTree(); refreshGitSoon();
     } else {
       if (name === 'run_command') { termPrint(`$ ${args.command}\n${r.result}\n\n`); renderTree(); refreshGitSoon(); }
       body.innerHTML = `<pre>${esc(String(r.result).slice(0, 4000))}</pre>`;
@@ -555,7 +1025,16 @@ function closeTabForce(p) { tabs = tabs.filter(t => t.path !== p); activate(tabs
 async function attachMentions(text) {
   const set = new Set(), out = [];
   for (const m of text.matchAll(/@([\w.\-\/\\]+)/g)) { const p = m[1].replace(/\\/g, '/'); if (files.includes(p)) set.add(p); }
-  for (const p of set) { try { const { content } = await api('/api/file?path=' + encodeURIComponent(p)); out.push(`### ${p}\n\`\`\`\n${content.slice(0, P().ctxChars)}\n\`\`\``); } catch (er) { toast(L2(`Не удалось прикрепить ${p}: `, `Could not attach ${p}: `) + er.message, 5000); } }
+  let budget = P().ctxChars * 2;                       // десяток файлов не должен вытеснить сам вопрос
+  for (const p of set) {
+    if (budget <= 0) { toast(L2('Часть файлов не прикреплена: слишком много текста', 'Some files were not attached: too much text'), 4000); break; }
+    try {
+      const { content } = await api('/api/file?path=' + encodeURIComponent(p));
+      const part = content.slice(0, Math.min(P().ctxChars, budget));
+      budget -= part.length;
+      out.push(`### ${p}\n\`\`\`\n${part}\n\`\`\``);
+    } catch (er) { toast(L2(`Не удалось прикрепить ${p}: `, `Could not attach ${p}: `) + er.message, 5000); }
+  }
   return out.length ? tr('attached') + '\n' + out.join('\n') : '';
 }
 function saveChat() { try { localStorage['lc_chat:' + info.root] = JSON.stringify(chatHist.slice(-40)); } catch {} }
@@ -594,10 +1073,11 @@ read_file {"path":"..."} — прочитать файл
 write_file {"path":"...","content":"..."} — создать или перезаписать файл
 replace_in_file {"path":"...","old_str":"...","new_str":"..."} — заменить фрагмент
 search {"query":"..."} — поиск по проекту
-run_command {"command":"...","shell":"powershell"} — команда в терминале (shell необязателен)
+run_command {"command":"...","shell":"powershell","cwd":"папка"} — команда в терминале (shell и cwd необязательны)
 make_dir {"path":"~/Desktop/Новая папка"} — создать папку
 delete_path {"path":"..."} — удалить в корзину
 bluetooth {"action":"on | off | status | devices | settings"} — Bluetooth
+system {"action":"info | drives | processes | windows | screenshot | clipboard_get | clipboard_set | volume_up | volume_down | mute | lock | sleep | shutdown | restart | kill", "pid":0, "text":"...", "confirm":true} — управление компьютером (shutdown/restart только с confirm:true)
 Пути: без префикса — внутри проекта; ~/Desktop/имя — рабочий стол; ~/Documents/имя — документы; ~/Downloads/имя — загрузки.
 Примеры:
 Пользователь: открой папку Фото на рабочем столе
@@ -616,10 +1096,11 @@ read_file {"path":"..."} — read a file
 write_file {"path":"...","content":"..."} — create or overwrite a file
 replace_in_file {"path":"...","old_str":"...","new_str":"..."} — replace a fragment
 search {"query":"..."} — search the project
-run_command {"command":"...","shell":"powershell"} — terminal command (shell is optional)
+run_command {"command":"...","shell":"powershell","cwd":"folder"} — terminal command (shell is optional)
 make_dir {"path":"~/Desktop/New folder"} — create a folder
 delete_path {"path":"..."} — delete to the Recycle Bin
 bluetooth {"action":"on | off | status | devices | settings"} — Bluetooth
+system {"action":"info | drives | processes | windows | screenshot | clipboard_get | clipboard_set | volume_up | volume_down | mute | lock | sleep | shutdown | restart | kill", "pid":0, "text":"...", "confirm":true} — control the computer (shutdown/restart need confirm:true)
 Paths: no prefix — inside the project; ~/Desktop/name — desktop; ~/Documents/name — documents; ~/Downloads/name — downloads.
 Examples:
 User: open the Photos folder on the desktop
@@ -746,7 +1227,7 @@ async function genProgram(raw, it) {
   say(L2(`Готово: создал \`${name}\` и открыл в редакторе. ${it.ext === 'html' ? 'Нажмите ▶ Запуск, чтобы открыть в браузере.' : 'Нажмите ▶ Запуск (F5), чтобы запустить, или 🐞 Отладка (Shift+F5).'}`, `Done: created \`${name}\` and opened it in the editor. ${it.ext === 'html' ? 'Press ▶ Run to open it in the browser.' : 'Press ▶ Run (F5) to run it or 🐞 Debug (Shift+F5).'}`));
 }
 function choosePath(title, list, tool) {
-  addMsg('ai', `<div>${esc(title)}</div><div class="choices">` + list.map(x => `<button class="choice" data-pick="${escA(x.path)}" data-tool="${tool}">${esc(x.path)}</button>`).join('') + '</div>');
+  addMsg('ai', `<div>${esc(title)}</div><div class="choices">` + list.map(x => `<button class="choice" data-pick="${escA(x.path)}" data-tool="${escA(tool)}">${esc(x.path)}</button>`).join('') + '</div>');
   chatHist.push({ role: 'assistant', content: title + '\n' + list.map(x => '- ' + x.path).join('\n') }); saveChat();
 }
 async function runIntent(it, raw) {
@@ -788,44 +1269,86 @@ async function runIntent(it, raw) {
   }
 }
 
+/* Повторить последний запрос: из истории убирается прошлый ответ и его сообщения в окне. */
+function regenerate() {
+  if (busy) return toast(tr('c_wait'));
+  while (chatHist.length && chatHist[chatHist.length - 1].role !== 'user') chatHist.pop();
+  const last = chatHist[chatHist.length - 1];
+  if (!last || isToolRes(last)) return toast(tr('regen_none'));
+  const text = String(last.content).split(ATT_RE)[0];
+  chatHist.pop();
+  const nodes = [...$('#log').children];
+  let at = -1;
+  nodes.forEach((n, i) => { if (n.classList.contains('user')) at = i; });
+  if (at >= 0) nodes.slice(at).forEach(n => n.remove());
+  $('#prompt').value = text;
+  send();
+}
 async function send(opts = {}) {
   const raw = $('#prompt').value.trim(); if (!raw || busy) return;
   const e = ep();
   if (!e.baseUrl || !e.model) return openSettings();
   if (cfg.mode === 'online' && !e.apiKey && !/localhost|127\.0\.0\.1/.test(e.baseUrl)) { toast(tr('need_key')); return openSettings('online'); }
   stopSpeak(); $('#prompt').value = ''; setBusy(true); stopFlag = false; chatCtl = new AbortController();
+  const gen = ++chatGen;                                 // ответ старого запроса не должен трогать новый чат
   addMsg('user', esc(raw));
   const att = await attachMentions(raw);
+  if (gen !== chatGen) return;                           // за время прикрепления файлов нажали «Новый чат»
   chatHist.push({ role: 'user', content: att ? raw + '\n\n' + att : raw });
   const agent = !opts.quick && $('#chatMode').value === 'agent';
-  const native = agent && ep().useTools, textAgent = agent && !native;
+  let native = agent && ep().useTools, textAgent = agent && !native;
   const fctx = fileContext(!!opts.force), tStart = performance.now();
+  let lastShown = '';                                   // вне цикла: нужно и после выхода из него
   try {
-    if (!opts.quick) { const it = routeIntent(raw); if (it) { await runIntent(it, raw); setBusy(false); return; } }
+    if (!opts.quick) { const it = routeIntent(raw); if (it) { await runIntent(it, raw); if (gen === chatGen) setBusy(false); return; } }
     for (let i = 0; i < (textAgent ? 8 : 25) && !stopFlag; i++) {
       const bub = addMsg('ai', `<span class="hint">${esc(tr('c_think'))}</span>`); let acc = '', raf = 0;
       let m;
       const tLlm = performance.now();
       try { m = await llm([{ role: 'system', content: systemPrompt(native, textAgent) }, ...withCtx(fctx)], { tools: native ? activeTools() : null, signal: chatCtl.signal,
         onDelta: d => { acc += d; if (!raf) raf = setTimeout(() => { raf = 0; bub.innerHTML = md(textAgent ? visible(acc) : acc) || '<span class="hint">…</span>'; scrollLog(); }, 70); } }); }
-      catch (er) { clearTimeout(raf); bub.remove(); throw er; }
+      catch (er) {
+        clearTimeout(raf); bub.remove();
+        /* Модель может не поддерживать вызов функций — переключаемся на текстовый агент и пробуем ещё раз. */
+        if (native && i === 0 && /tool|function|support|不支持|tool_choice/i.test(String(er.message || ''))) {
+          native = false; textAgent = true;
+          toast(L2('Модель не поддерживает вызов функций — работаю через текстовые команды', 'The model does not support tool calls — using text commands'), 5000);
+          continue;
+        }
+        throw er;
+      }
       clearTimeout(raf); showStat((performance.now() - tLlm) / 1000, (m.content || '').length);
+      if (gen !== chatGen) return;                       // «Новый чат» во время ответа: историю не трогаем
       let tcall = null;
       if (textAgent && m.content) { tcall = parseTextTool(m.content); if (tcall) m = { ...m, content: m.content.slice(0, tcall.end) }; }
       const shown = textAgent ? visible(m.content || '') : m.content;
+      lastShown = shown || lastShown;
       if (shown) bub.innerHTML = md(shown); else bub.remove();
       chatHist.push(m); saveChat();
       if (tcall) {
         const out = await runTool({ id: 'tc' + Date.now(), function: { name: tcall.name, arguments: JSON.stringify(tcall.args) } });
+        if (gen !== chatGen) return;
         chatHist.push({ role: 'user', content: TR_PREFIX + tcall.name + ']\n' + String(out).slice(0, Math.max(2000, P().ctxChars / 3)) }); saveChat();
         continue;
       }
       if (!m.tool_calls || !m.tool_calls.length) { speakReply(shown); break; }
-      for (const c of m.tool_calls) { const out = await runTool(c); chatHist.push({ role: 'tool', tool_call_id: c.id, content: out }); if (stopFlag) break; }
+      for (let k = 0; k < m.tool_calls.length; k++) {
+        if (gen !== chatGen) return;
+        const c = m.tool_calls[k];
+        if (stopFlag) {
+          /* У каждого tool_call в истории должен быть ответ, иначе следующий запрос к модели будет отвергнут. */
+          for (const rest of m.tool_calls.slice(k)) chatHist.push({ role: 'tool', tool_call_id: rest.id, content: 'Cancelled by the user.' });
+          break;
+        }
+        const out = await runTool(c); if (gen !== chatGen) return; chatHist.push({ role: 'tool', tool_call_id: c.id, content: out });
+      }
       saveChat();
     }
-    if (stopFlag) addMsg('sys', tr('stopped')); else if (uiCfg().sound && performance.now() - tStart > 3000) beep();
+    if (gen !== chatGen) return;
+    if (stopFlag) addMsg('sys', tr('stopped'));
+    else if (performance.now() - tStart > 3000) { const u = uiCfg(); if (u.sound) beep(); if (u.notify) notifyDone(lastShown); }
   } catch (er) {
+    if (gen !== chatGen) return;
     if (stopFlag || /Остановлено|Stopped|abort/i.test(er.message)) addMsg('sys', tr('stopped'));
     else {
       let hint = tr('err_hint');
@@ -835,12 +1358,16 @@ async function send(opts = {}) {
       if (chatHist.length && chatHist[chatHist.length - 1].role === 'user') chatHist.pop();
     }
   }
-  setBusy(false);
+  if (gen === chatGen) setBusy(false);
 }
 
 $('#send').onclick = () => send();
 $('#stop').onclick = () => { stopSpeak(); stopFlag = true; if (chatCtl) chatCtl.abort(); if (pendingAsk) pendingAsk(false); };
-$('#newChat').onclick = () => { stopSpeak(); chatHist = []; $('#log').innerHTML = ''; saveChat(); };
+$('#newChat').onclick = () => {
+  stopSpeak(); stopFlag = true; chatGen++; if (chatCtl) chatCtl.abort(); if (pendingAsk) pendingAsk(false);
+  stopFlag = false; setBusy(false);                       // старый ответ больше не трогает новый чат
+  chatHist = []; $('#log').innerHTML = ''; saveChat();
+};
 $('#chatMode').onchange = () => updateStatus2();
 
 /* @-упоминания */
@@ -885,22 +1412,39 @@ function paletteActions() {
     [L2('Файл: новый файл', 'File: new file'), () => $('#newFile').click()], [L2('Файл: сохранить всё', 'File: save all'), async () => { for (const t of tabs) if (t.dirty) await saveTab(t, true); toast(tr('saved')); }],
     [L2('Проект: открыть другую папку', 'Project: open another folder'), () => openFolder()],
     [L2('Код: запустить файл (F5)', 'Code: run the file (F5)'), () => runCurrent(false)], [L2('Код: отладка (Shift+F5)', 'Code: debug (Shift+F5)'), () => runCurrent(true)],
-    [L2('Терминал: показать или скрыть', 'Terminal: show or hide'), () => toggleTerm()], [L2('Терминал: очистить', 'Terminal: clear'), () => { $('#termOut').textContent = ''; }],
+    [L2('Терминал: показать или скрыть', 'Terminal: show or hide'), () => toggleTerm()], [L2('Терминал: очистить', 'Terminal: clear'), () => { clearTerm(); }],
     [L2('Git: статус', 'Git: status'), () => { toggleTerm(true); termRun('git status'); }],
     [L2('Git: сохранить изменения (коммит)…', 'Git: commit changes…'), () => { const m = prompt(L2('Описание изменений:', 'Commit message:'), L2('Правки', 'Update')); if (m) { toggleTerm(true); termRun('git add -A && git commit -m "' + m.replace(/["`$\\]/g, ' ') + '"'); } }],
-    [L2('Чат: новый чат', 'Chat: new chat'), () => $('#newChat').click()], [L2('Чат: сохранить в файл', 'Chat: export to a file'), () => exportChat()], [L2('Чат: скопировать последний ответ', 'Chat: copy the last answer'), () => copyLast()],
+    [L2('Чат: новый чат', 'Chat: new chat'), () => $('#newChat').click()], [L2('Чат: повторить последний запрос', 'Chat: retry the last request'), () => regenerate()], [L2('Чат: сохранить в файл', 'Chat: export to a file'), () => exportChat()], [L2('Чат: скопировать последний ответ', 'Chat: copy the last answer'), () => copyLast()],
     [L2('Чат: режим «Агент»', 'Chat: Agent mode'), () => { $('#chatMode').value = 'agent'; updateStatus(); }], [L2('Чат: режим «Вопрос»', 'Chat: Ask mode'), () => { $('#chatMode').value = 'ask'; updateStatus(); }],
     [L2('ИИ: режим «Офлайн»', 'AI: Offline mode'), sw('offline')], [L2('ИИ: режим «Онлайн»', 'AI: Online mode'), sw('online')],
     [L2('ИИ: сбросить паузы ключей', 'AI: clear key pauses'), async () => { await post('/api/keys/reset', {}); toast(tr('keys_reset_done')); }],
     [L2('Голос: начать или закончить запись (Alt+M)', 'Voice: start or stop recording (Alt+M)'), () => toggleVoice()],
     [L2('Вид: светлая или тёмная тема', 'View: light or dark theme'), () => $('#themeBtn').click()], [L2('Вид: настройки оформления', 'View: appearance settings'), () => openSettings()],
     [L2('Помощь: горячие клавиши (F1)', 'Help: hotkeys (F1)'), () => openHelp()],
+    [L2('Проект: история правок', 'Project: edit history'), () => openHistory()],
+    [L2('Проект: замена по всему проекту', 'Project: replace across the project'), () => { $('.stabs button[data-p=search]').click(); $('#sQ').focus(); }],
+    [L2('Проект: скачать в ZIP', 'Project: download as ZIP'), () => exportZip()],
+    [L2('Проект: загрузить ZIP', 'Project: upload a ZIP'), () => $('#zipFile').click()],
+    [L2('Программа: проверить окружение', 'App: check the environment'), () => { openSettings(); $('#envBtn').click(); }],
+    [L2('Программа: проверить обновления', 'App: check for updates'), () => { openSettings(); $('#updBtn').click(); }],
+    [L2('Файл: найти в файле (Ctrl+F)', 'File: find in file (Ctrl+F)'), () => openFind()],
+    [L2('Код: продублировать строку (Ctrl+D)', 'Code: duplicate line (Ctrl+D)'), () => duplicateSelection()],
+    [L2('Код: удалить строку (Ctrl+Shift+K)', 'Code: delete line (Ctrl+Shift+K)'), () => deleteLine()],
+    [L2('Код: переместить строки вверх (Alt+↑)', 'Code: move lines up (Alt+↑)'), () => moveLines(-1)],
+    [L2('Код: переместить строки вниз (Alt+↓)', 'Code: move lines down (Alt+↓)'), () => moveLines(1)],
+    [L2('Код: отсортировать выделенные строки', 'Code: sort selected lines'), () => sortSelected()],
+    [L2('Код: убрать пробелы в конце строк', 'Code: trim trailing spaces'), () => trimTrailing()],
+    [L2('Код: отформатировать JSON', 'Code: format JSON'), () => formatJson()],
+    [L2('Файл: сохранить как шаблон…', 'File: save as template…'), () => saveTemplate()],
+    ...Object.keys(templates()).map((n) => [L2('Шаблон: вставить «', 'Template: insert “') + n + '”', () => insertTemplate(n)]),
   ];
 }
 function renderQo() {
   const q = $('#qoIn').value.trim();
   if (q.startsWith('>')) { const w = q.slice(1).trim().toLowerCase(); qoItems = paletteActions().filter(a => !w || a[0].toLowerCase().includes(w)).map(a => ({ label: a[0], run: a[1] })); }
-  else qoItems = (q ? files.map(f => [f, fuzzy(q, f)]).filter(x => x[1] >= 0).sort((a, b) => b[1] - a[1]).map(x => x[0]) : files).slice(0, 60);
+  else if (q) qoItems = files.map(f => [f, fuzzy(q, f)]).filter(x => x[1] >= 0).sort((a, b) => b[1] - a[1]).map(x => x[0]).slice(0, 60);
+  else qoItems = [...new Set([...recentFiles().filter(f => files.includes(f)), ...files])].slice(0, 60);
   qoSel = Math.min(qoSel, Math.max(0, qoItems.length - 1));
   $('#qoList').innerHTML = ''; qoItems.forEach((f, i) => { const d = document.createElement('div'); d.className = 'mi' + (i === qoSel ? ' on' : ''); d.textContent = typeof f === 'string' ? f : f.label; d.onclick = () => pickQo(f); $('#qoList').appendChild(d); });
 }
@@ -938,9 +1482,10 @@ function loadForm() {
   $('#epLegend').textContent = tr(editMode === 'offline' ? 'set_off_leg' : 'set_on_leg');
   $('#fProfile').value = draft.profile; $('#fAC').checked = draft.autocomplete; $('#fTheme').value = draft.theme;
   $('#fLang').value = draft.lang || LANG; $('#fAutosave').checked = !!draft.autosave; $('#fWeb').checked = !!draft.webSearch;
+  $('#fFullAccess').checked = info.fullAccess !== false;
   $('#fPrompt').value = draft.sysPrompt || ''; $('#fVoiceSend').checked = draft.voiceSend !== false; $('#fVoiceSpeak').checked = !!draft.voiceSpeak;
-  $('#catBox').hidden = editMode !== 'offline';
-  loadUiForm();
+  $('#catBox').style.display = editMode === 'offline' ? '' : 'none';
+  loadUiForm(); renderBuild();
   if (editMode === 'offline') loadCatalog();
 }
 
@@ -1023,8 +1568,13 @@ $('#fPreset').onchange = () => {
   const mem = draft.keyMemo[editMode + ':' + k] || [];
   draft[editMode] = { ...mkEp(editMode, k), apiKeys: mem, apiKey: mem[0] || '' }; loadForm();
 };
-const keysFromForm = () => { const ks = [...new Set($('#fKeys').value.split(/[\s,;]+/).map(x => x.trim()).filter(Boolean))]; return { apiKeys: ks, apiKey: ks[0] || '' }; };
+const keysFromForm = () => { const ks = [...new Set($('#fKeys').value.split(/[\s,;]+/).map(x => x.trim()).filter(Boolean))].slice(0, 20); return { apiKeys: ks, apiKey: ks[0] || '' }; };
 $('#fKeysShow').onchange = () => $('#fKeys').classList.toggle('show', $('#fKeysShow').checked);
+// «Без подтверждений» снимает защиту от опасных действий — спрашиваем один раз при включении.
+$('#auto').onchange = () => {
+  if ($('#auto').checked && !confirm(L2('Включить режим без подтверждений?\nВсе действия агента (команды, правка и удаление файлов, установка программ) будут выполняться сразу, без кнопки «Разрешить». Включайте, только если понимаете риск.',
+    'Turn off confirmations?\nEvery agent action (commands, editing and deleting files, installing programs) will run immediately without an Allow button. Enable only if you understand the risk.'))) $('#auto').checked = false;
+};
 $('#fKeysTest').onclick = async () => {
   const out = $('#fKeysRes'), { apiKeys } = keysFromForm();
   if (!apiKeys.length) { out.textContent = tr('keys_none'); return; }
@@ -1045,12 +1595,30 @@ $('#fTest').onclick = async () => {
   try { const m = await llm([{ role: 'user', content: 'Reply with one word: ok' }], { e: draft[editMode], opts: { maxTokens: 16 } }); el.textContent = tr('test_ok', (m.content || '').slice(0, 40)); }
   catch (er) { el.textContent = '✗ ' + er.message; }
 };
+/* ---- о программе и подлинность сборки ---- */
+function buildLabel(b) {
+  b = b || (info.integrity || {});
+  if (b.state === 'official') return tr('build_official', b.version || '—');
+  if (b.state === 'modified') return tr('build_modified', (b.files || []).join(', '));
+  if (b.state === 'tampered') return tr('build_tampered');
+  return tr('build_unsigned');
+}
+function renderBuild() {
+  const el = $('#buildState'); if (!el) return;
+  const b = info.integrity || {};
+  el.textContent = buildLabel(b);
+  el.style.color = b.state === 'official' ? 'var(--ok)' : b.state === 'unsigned' ? '' : 'var(--err)';
+  const v = $('#aboutVer'); if (v) v.textContent = tr('about_ver', info.version || '—');
+}
 $('#setCancel').onclick = () => { $('#modal').classList.remove('open'); applyTheme(); };
-$('#setSave').onclick = () => {
+$('#setSave').onclick = async () => {
   readForm(); draft.profile = $('#fProfile').value; draft.autocomplete = $('#fAC').checked; draft.theme = $('#fTheme').value;
   draft.autosave = $('#fAutosave').checked; draft.lang = $('#fLang').value;
   draft.ui = readUiForm(); draft.voiceEngine = $('#fVoiceEngine').value; draft.sttSize = $('#fSttSize').value; draft.voiceAuto = $('#fVoiceAuto').checked; draft.webSearch = $('#fWeb').checked;
   draft.sysPrompt = $('#fPrompt').value; draft.voiceSend = $('#fVoiceSend').checked; draft.voiceSpeak = $('#fVoiceSpeak').checked; if (!draft.voiceSpeak) stopSpeak();
+  const wantFull = $('#fFullAccess').checked;
+  try { const a = await post('/api/access', { full: wantFull }); info.fullAccess = a.full; updateAccess(); toast(tr(a.full ? 'full_on' : 'full_off'), 3500); }
+  catch (e) { toast(e.message); }
   cfg = draft; LANG = cfg.lang; saveCfg(); $('#modal').classList.remove('open'); applyTheme(); refreshLang();
 };
 $('#settingsBtn').onclick = () => openSettings();
@@ -1058,15 +1626,23 @@ $('#modal').onclick = (e) => { if (e.target.id === 'modal') { $('#modal').classL
 $('#help').onclick = (e) => { if (e.target.id === 'help') $('#help').classList.remove('open'); };
 $('#helpClose').onclick = () => $('#help').classList.remove('open');
 
-function applyTheme() { document.documentElement.dataset.theme = cfg.theme || 'dark'; applyUi(); }
+const sysLight = (typeof matchMedia === 'function') ? matchMedia('(prefers-color-scheme: light)') : null;
+const sysTheme = () => (sysLight && sysLight.matches ? 'light' : 'dark');
+function applyTheme() { document.documentElement.dataset.theme = cfg.theme === 'auto' ? sysTheme() : (cfg.theme || 'dark'); applyUi(); }
+if (sysLight && sysLight.addEventListener) sysLight.addEventListener('change', () => { if (cfg && cfg.theme === 'auto') applyTheme(); });
 $('#themeBtn').onclick = () => { cfg.theme = cfg.theme === 'light' ? 'dark' : 'light'; saveCfg(); applyTheme(); };
 function updateHeader() {
   $$('#modeSeg button').forEach(b => b.classList.toggle('on', b.dataset.m === cfg.mode));
   $('#modelLabel').textContent = ep().model + ((ep().apiKeys || []).length > 1 ? ' · 🔑' + ep().apiKeys.length : '');
   updateStatus2();
 }
+function updateAccess() {
+  const on = !info || info.fullAccess !== false;
+  const b = $('#accessBadge'); if (b) b.hidden = !on;
+  updateStatus2();
+}
 function updateStatus2() {
-  $('#stMode').textContent = tr(cfg.mode === 'offline' ? 'm_offline' : 'm_online') + ' · ' + tr($('#chatMode').value === 'agent' ? 'st_mode_agent' : 'st_mode_ask') + (useTools() ? '' : ($('#chatMode').value === 'agent' ? tr('st_textagent') : tr('st_notools')));
+  $('#stMode').textContent = tr(cfg.mode === 'offline' ? 'm_offline' : 'm_online') + ' · ' + tr($('#chatMode').value === 'agent' ? 'st_mode_agent' : 'st_mode_ask') + (useTools() ? '' : ($('#chatMode').value === 'agent' ? tr('st_textagent') : tr('st_notools'))) + ' · ' + tr(info && info.fullAccess !== false ? 'st_full' : 'st_limited');
   $('#stAC').textContent = tr('st_ac', tr(cfg.autocomplete ? 'on' : 'off')); $('#stAC').title = tr('st_ac_tip');
   $('#stSave').textContent = tr('st_autosave', tr(cfg.autosave ? 'on' : 'off')); $('#stSave').title = tr('st_autosave_tip');
   $('#prompt').title = useTools() ? '' : ($('#chatMode').value === 'agent' ? tr('st_hint_textagent') : tr('st_hint_notools'));
@@ -1250,7 +1826,7 @@ function finishBrowser() {
 $('#mic').onclick = toggleVoice;
 
 /* ================= Оформление и кастомизация ================= */
-const UI_DEF = { accent: '', fs: 13, lh: 1.55, font: '', chatFs: 13, radius: 8, density: 'normal', lineNums: true, quick: true, tab: 2, css: '', uiFont: '', lig: false, ew: 400, syntax: 'default', chatStyle: 'bubbles', chatSide: 'right', anim: true, statusBar: true, wrapCode: false, asMs: 1000, acMs: 0, quickList: '', sound: false };
+const UI_DEF = { accent: '', fs: 13, lh: 1.55, font: '', chatFs: 13, radius: 8, density: 'normal', lineNums: true, quick: true, tab: 2, css: '', uiFont: '', lig: false, ew: 400, syntax: 'default', chatStyle: 'bubbles', chatSide: 'right', anim: true, statusBar: true, wrapCode: false, wrap: false, asMs: 1000, acMs: 0, quickList: '', sound: false, notify: false };
 const SWATCHES = ['#7c9cff', '#a78bfa', '#34d399', '#fbbf24', '#fb7185', '#22d3ee', '#f97316'];
 const uiCfg = () => ({ ...UI_DEF, ...((cfg && cfg.ui) || {}) });
 const IND = () => ' '.repeat(Math.max(1, Math.min(8, +uiCfg().tab || 2)));
@@ -1275,13 +1851,16 @@ function applyUi(u) {
   $('#quick').hidden = u.quick === false;
   let st = $('#userCss'); if (!st) { st = document.createElement('style'); st.id = 'userCss'; document.head.appendChild(st); }
   st.textContent = u.css || '';
-  if (typeof render === 'function' && cur && cur()) { render.n = 0; render(); syncScroll(); }
+  /* Оформление меняется только через CSS-переменные: пересобирать подсветку всего файла на каждый
+     сдвиг ползунка не нужно — достаточно выровнять слои прокрутки. */
+  applyWrap();
+  if (cur && cur()) { try { syncScroll(); updateCurLine(); } catch {} }
 }
 function readUiForm() {
   return { accent: $('#fAccent').dataset.on === '1' ? $('#fAccent').value : '', fs: +$('#fFs').value, lh: +$('#fLh').value, font: $('#fFont').value, chatFs: +$('#fChatFs').value,
     radius: +$('#fRadius').value, density: $('#fDensity').value, lineNums: $('#fNums').checked, quick: $('#fQuick').checked, tab: +$('#fTab').value, css: $('#fCss').value,
     uiFont: $('#fUiFont').value, lig: $('#fLig').checked, ew: +$('#fEw').value, syntax: $('#fSyntax').value, chatStyle: $('#fChatStyle').value, chatSide: $('#fChatSide').value, anim: $('#fAnim').checked, statusBar: $('#fStatusBar').checked,
-    wrapCode: $('#fWrapCode').checked, asMs: Math.max(200, +$('#fAsMs').value || 1000), acMs: Math.max(0, +$('#fAcMs').value || 0), quickList: $('#fQuickList').value, sound: $('#fSound').checked };
+    wrapCode: $('#fWrapCode').checked, wrap: !!(uiCfg && uiCfg().wrap), asMs: Math.max(200, +$('#fAsMs').value || 1000), acMs: Math.max(0, +$('#fAcMs').value || 0), quickList: $('#fQuickList').value, sound: $('#fSound').checked, notify: $('#fNotify').checked };
 }
 function loadUiForm(u) {
   const d = (typeof draft !== 'undefined' && draft) || cfg; u = u || { ...UI_DEF, ...(d.ui || {}) };
@@ -1289,11 +1868,14 @@ function loadUiForm(u) {
   $('#fFs').value = u.fs; $('#fLh').value = u.lh; $('#fFont').value = u.font; $('#fChatFs').value = u.chatFs; $('#fRadius').value = u.radius;
   $('#fDensity').value = u.density; $('#fNums').checked = u.lineNums !== false; $('#fQuick').checked = u.quick !== false; $('#fTab').value = u.tab; $('#fCss').value = u.css || '';
   $('#fUiFont').value = u.uiFont; $('#fLig').checked = !!u.lig; $('#fEw').value = u.ew; $('#fSyntax').value = u.syntax; $('#fChatStyle').value = u.chatStyle; $('#fChatSide').value = u.chatSide; $('#fAnim').checked = u.anim !== false;
-  $('#fStatusBar').checked = u.statusBar !== false; $('#fWrapCode').checked = !!u.wrapCode; $('#fAsMs').value = u.asMs; $('#fAcMs').value = u.acMs; $('#fQuickList').value = u.quickList || ''; $('#fSound').checked = !!u.sound;
+  $('#fStatusBar').checked = u.statusBar !== false; $('#fWrapCode').checked = !!u.wrapCode; $('#fAsMs').value = u.asMs; $('#fAcMs').value = u.acMs; $('#fQuickList').value = u.quickList || ''; $('#fSound').checked = !!u.sound; $('#fNotify').checked = !!u.notify;
   $('#fVoiceEngine').value = d.voiceEngine || 'whisper'; $('#fSttSize').value = d.sttSize || 'base'; $('#fVoiceAuto').checked = d.voiceAuto !== false;
   $('#swatches').innerHTML = SWATCHES.map(c => `<button type="button" class="sw" data-c="${c}" style="background:${c}" title="${c}"></button>`).join('');
   refreshSttState();
 }
+$('#fNotify').addEventListener('change', async (e) => {
+  if (e.target.checked && typeof Notification !== 'undefined' && Notification.permission === 'default') { try { await Notification.requestPermission(); } catch {} }
+});
 $('#uiBox').addEventListener('input', (e) => { if (e.target.id === 'fAccent') e.target.dataset.on = '1'; applyUi(readUiForm()); });
 $('#swatches').addEventListener('click', (e) => { const b = e.target.closest('.sw'); if (!b) return; $('#fAccent').value = b.dataset.c; $('#fAccent').dataset.on = '1'; applyUi(readUiForm()); });
 $('#fAccentReset').onclick = () => { $('#fAccent').dataset.on = '0'; applyUi(readUiForm()); };
@@ -1307,7 +1889,7 @@ $('#vRemove').onclick = async () => { if (!confirm(tr('v_ask_remove'))) return; 
 /* ================= Язык, git, быстрые действия, справка ================= */
 function refreshLang() {
   applyI18n(); $('#langBtn').textContent = LANG.toUpperCase();
-  buildQuick(); updateHeader(); updateStatus(); refreshGit();
+  buildQuick(); updateHeader(); updateStatus(); refreshGit(); try { renderBuild(); } catch {}
 }
 $('#langBtn').onclick = () => { LANG = LANG === 'ru' ? 'en' : 'ru'; cfg.lang = LANG; saveCfg(); refreshLang(); };
 
@@ -1341,7 +1923,7 @@ function quickAction(k) {
   send({ force: true, quick: true });
 }
 
-function keyList() { return [['Ctrl+S', 'h_save'], ['Ctrl+P', 'h_open'], ['Ctrl+Shift+F', 'h_search'], ['Ctrl+`', 'h_term'], ['Ctrl+,', 'h_settings'], ['Ctrl+K', 'h_edit'], ['Ctrl+L', 'h_chat'], ['Tab', 'h_accept'], ['Ctrl+/', 'h_comment'], ['Tab / Shift+Tab', 'h_indent'], [L2('@файл', '@file'), 'h_mention'], ['Alt+M', 'h_voice'], ['F5', 'h_run'], ['Shift+F5', 'h_debug'], ['F1', 'h_help']]; }
+function keyList() { return [['Ctrl+S', 'h_save'], ['Ctrl+Shift+S', 'h_save_all'], ['Ctrl+W', 'h_close_tab'], ['Ctrl+H', 'h_replace'], ['Alt+Z', 'h_wrap'], ['Ctrl+P', 'h_open'], ['Ctrl+Shift+F', 'h_search'], ['Ctrl+`', 'h_term'], ['Ctrl+,', 'h_settings'], ['Ctrl+K', 'h_edit'], ['Ctrl+L', 'h_chat'], ['Tab', 'h_accept'], ['Ctrl+/', 'h_comment'], ['Tab / Shift+Tab', 'h_indent'], ['Ctrl+F', 'h_find'], ['Ctrl+D', 'h_dup'], ['Ctrl+Shift+K', 'h_del'], ['Alt+↑ / Alt+↓', 'h_move'], ['Ctrl+G', 'h_goto'], [L2('@файл', '@file'), 'h_mention'], ['Alt+M', 'h_voice'], ['F5', 'h_run'], ['Shift+F5', 'h_debug'], ['F1', 'h_help']]; }
 function openHelp() { $('#helpList').innerHTML = keyList().map(([k, d]) => `<div class="kb"><kbd>${esc(k)}</kbd><span>${esc(tr(d))}</span></div>`).join(''); $('#help').classList.add('open'); }
 $('#helpBtn').onclick = openHelp;
 
@@ -1370,7 +1952,29 @@ async function openFolder() {
   try { await post('/api/chdir', { path: p }); location.reload(); } catch (e) { toast(e.message); }
 }
 $('#projBtn').onclick = (e) => { e.stopPropagation(); const r = e.target.getBoundingClientRect(); showMenu({ clientX: r.left, clientY: r.bottom + 4 },
-  [...(info.recent || []).filter(x => x !== info.root).slice(0, 6).map(p => [p, async () => { await post('/api/chdir', { path: p }); location.reload(); }]), '-', ['Открыть папку…', openFolder]]); };
+  [...(info.recent || []).filter(x => x !== info.root).slice(0, 6).map(p => [p, async () => { await post('/api/chdir', { path: p }); location.reload(); }]), '-', [tr('m_openfolder'), openFolder]]); };
+
+/* ================= Управление компьютером ================= */
+async function systemAction(action, extra = {}) {
+  const out = await execTool('system', { action, ...extra });
+  if (/^(clipboard_get|info|drives|processes|windows)$/.test(action) && out && !failed(out) && !declined(out)) say('`system: ' + action + '`\n```\n' + String(out).slice(0, 12000) + '\n```');
+  return out;
+}
+$('#sysBtn').onclick = (e) => {
+  e.stopPropagation();
+  const r = e.target.getBoundingClientRect();
+  const act = (a, extra) => async () => { await systemAction(a, extra); };
+  showMenu({ clientX: Math.min(r.left, innerWidth - 240), clientY: r.bottom + 4 }, [
+    [tr('sys_info'), act('info')], [tr('sys_drives'), act('drives')], [tr('sys_processes'), act('processes')], [tr('sys_windows'), act('windows')], '-',
+    [tr('sys_shot'), act('screenshot')], [tr('sys_clip_get'), act('clipboard_get')],
+    [tr('sys_clip_set'), async () => { const t = prompt(tr('sys_need_text')); if (t != null) await systemAction('clipboard_set', { text: t }); }], '-',
+    [tr('sys_vol_up'), act('volume_up')], [tr('sys_vol_down'), act('volume_down')], [tr('sys_mute'), act('mute')], '-',
+    [tr('sys_lock'), act('lock')], [tr('sys_sleep'), act('sleep')],
+    [tr('sys_shutdown'), async () => { if (confirm(tr('sys_shutdown_q'))) await systemAction('shutdown', { confirm: true }); }],
+    [tr('sys_restart'), async () => { if (confirm(tr('sys_restart_q'))) await systemAction('restart', { confirm: true }); }], '-',
+    [tr('sys_desktop'), async () => { await execTool('open', { target: info.desktop || '~' }); }],
+  ]);
+};
 
 /* ================= Панели и горячие клавиши ================= */
 $$('.split').forEach(s => s.addEventListener('mousedown', (e) => {
@@ -1389,9 +1993,13 @@ $('#splitT').addEventListener('mousedown', (e) => {
 
 addEventListener('keydown', (e) => {
   const mod = e.ctrlKey || e.metaKey, k = e.key.toLowerCase();
-  if (mod && k === 's') { e.preventDefault(); save(); }
+  if (mod && e.shiftKey && k === 's') { e.preventDefault(); saveAll(); }
+  else if (mod && k === 's') { e.preventDefault(); save(); }
+  else if (mod && k === 'w' && cur()) { e.preventDefault(); closeTab(activePath); }
+  else if (mod && k === 'h' && cur() && document.activeElement !== ed) { e.preventDefault(); openFind(); $('#findRep').focus(); }
   else if (mod && e.shiftKey && k === 'p') { e.preventDefault(); openQo('>'); }
   else if (mod && k === 'p') { e.preventDefault(); openQo(); }
+  else if (mod && k === 'g') { e.preventDefault(); const n = parseInt(prompt(L2('Перейти к строке:', 'Go to line:')), 10); if (n > 0) goToLine(n); }
   else if (mod && e.shiftKey && k === 'f') { e.preventDefault(); $('.stabs button[data-p=search]').click(); }
   else if (mod && k === '`') { e.preventDefault(); toggleTerm(); }
   else if (mod && k === ',') { e.preventDefault(); openSettings(); }
@@ -1404,7 +2012,7 @@ addEventListener('keydown', (e) => {
   else if (e.altKey && e.code === 'KeyM') { e.preventDefault(); e.stopPropagation(); if (!e.repeat) toggleVoice(); }
   else if (e.key === 'F1') { e.preventDefault(); openHelp(); }
   else if (e.key === 'F5') { e.preventDefault(); runCurrent(e.shiftKey); }
-  else if (e.key === 'Escape') { if (VS === 'rec') cancelVoice(); if ($('#modal').classList.contains('open')) applyTheme(); $('#modal').classList.remove('open'); $('#qo').classList.remove('open'); $('#help').classList.remove('open'); }
+  else if (e.key === 'Escape') { if (VS === 'rec') cancelVoice(); if ($('#findBar').style.display === 'flex') { closeFind(); return; } if ($('#modal').classList.contains('open')) applyTheme(); $('#modal').classList.remove('open'); $('#hist').classList.remove('open'); $('#qo').classList.remove('open'); $('#help').classList.remove('open'); }
 });
 addEventListener('beforeunload', (e) => { if (tabs.some(t => t.dirty)) { e.preventDefault(); e.returnValue = ''; } });
 
@@ -1416,15 +2024,20 @@ const ATT_RE = /\n\n(?:Прикреплённые файлы|Attached files):/;
   initCfg(info.defaults || {}); applyTheme();
   if (cfg.lang && cfg.lang !== LANG) LANG = cfg.lang;
   let saved = null; try { saved = JSON.parse(localStorage['lc_tabs:' + info.root] || 'null'); } catch {}
-  $('#projBtn').textContent = '📁 ' + info.name; $('#projBtn').title = info.root; $('#cwd').textContent = info.root;
+  $('#projBtn').textContent = info.name;
+  $('#projBtn').removeAttribute('data-i18n-title');        // иначе applyI18n() затрёт подсказку путём к папке
+  $('#projBtn').title = info.root; $('#cwd').textContent = info.root;
+  updateAccess();
   document.title = info.name + ' — LocalCode';
   try { rules = (await api('/api/rules')).rules; } catch {}
   try { chatHist = JSON.parse(localStorage['lc_chat:' + info.root] || '[]'); } catch { chatHist = []; }
   for (const m of chatHist) { if (m.role === 'user') { if (!isToolRes(m)) addMsg('user', esc(m.content.split(ATT_RE)[0])); } else if (m.role === 'assistant' && visible(m.content)) addMsg('ai', md(visible(m.content))); }
   refreshLang(); renderTabs(); renderTree();
+  const B0 = info.integrity || {};
+  if (B0.state === 'modified' || B0.state === 'tampered') addMsg('sys', esc(tr('build_boot_bad', (B0.files || []).join(', '))));
   if (!chatHist.length) addMsg('sys', esc(tr(cfg.mode === 'offline' ? 'welcome_off' : 'welcome_on')));
   if (rules) addMsg('sys', esc(tr('rules_on')));
-  await autoPickModel();
+  await autoPickModel().catch(() => {});
   await restoreTabs(saved); tabsReady = true; renderTabs();
   setInterval(() => { if (!document.hidden) refreshGit(); }, 20000);
 })();
@@ -1432,13 +2045,13 @@ setInterval(() => { fetch('/api/ping', { headers: H() }).catch(() => {}); }, 100
 
 $('#empty').addEventListener('click', (e) => {
   const b = e.target.closest('[data-qs]'); if (!b) return;
-  ({ new: () => $('#newFile').click(), open: () => openFolder(), ask: () => $('#prompt').focus(), settings: () => openSettings() })[b.dataset.qs]();
+  ({ new: () => $('#newFile').click(), open: () => openFolder(), ask: () => $('#prompt').focus(), help: () => openHelp(), settings: () => openSettings() })[b.dataset.qs]();
 });
 
 /* ================= Дополнительно: экспорт чата, звук, статистика, резервная копия настроек ================= */
 function downloadText(name, text, mime = 'text/plain') {
   const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type: mime + ';charset=utf-8' })); a.download = name; document.body.appendChild(a); a.click();
-  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500);
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 10000);
 }
 function exportChat() {
   const rows = chatHist.filter(m => (m.role === 'user' && !isToolRes(m)) || (m.role === 'assistant' && visible(m.content)));
@@ -1454,6 +2067,12 @@ async function copyLast() {
   try { await navigator.clipboard.writeText(visible(m.content)); toast(L2('Скопировано', 'Copied')); } catch { toast(L2('Не удалось скопировать', 'Could not copy')); }
 }
 $('#exportChat').onclick = exportChat;
+function notifyDone(text) {
+  try {
+    if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
+    new Notification('LocalCode', { body: String(text || '').replace(/\s+/g, ' ').trim().slice(0, 140) });
+  } catch {}
+}
 function beep() {
   try { const ac = new (window.AudioContext || window.webkitAudioContext)(), o = ac.createOscillator(), g = ac.createGain(); o.frequency.value = 880; g.gain.value = 0.06; o.connect(g); g.connect(ac.destination); o.start(); o.stop(ac.currentTime + 0.14); setTimeout(() => ac.close(), 400); } catch {}
 }
@@ -1473,7 +2092,7 @@ $('#fImportFile').onchange = async (e) => {
     const j = JSON.parse(await f.text()), c = j.cfg || j;
     if (!c || typeof c !== 'object' || !c.offline || !c.online) throw new Error(L2('Это не файл настроек LocalCode', 'This is not a LocalCode settings file'));
     for (const m of ['offline', 'online']) { if (!(c[m].apiKeys && c[m].apiKeys.length) && !c[m].apiKey) { c[m].apiKeys = cfg[m].apiKeys || []; c[m].apiKey = cfg[m].apiKey || ''; } }
-    cfg = { ...cfg, ...c }; saveCfg(); toast(L2('Настройки загружены, перезапускаю окно…', 'Settings loaded, reloading…')); setTimeout(() => location.reload(), 700);
+    cfg = normalizeCfg({ ...cfg, ...c }); saveCfg(); toast(L2('Настройки загружены, перезапускаю окно…', 'Settings loaded, reloading…')); setTimeout(() => location.reload(), 700);
   } catch (er) { toast(er.message, 6000); }
 };
 $('#fResetAll').onclick = () => { if (confirm(L2('Сбросить ВСЕ настройки (включая ключи API)? Проекты и файлы не пострадают.', 'Reset ALL settings (including API keys)? Projects and files are not affected.'))) { localStorage.removeItem('lc_cfg2'); location.reload(); } };

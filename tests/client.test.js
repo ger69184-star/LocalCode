@@ -19,7 +19,7 @@ const ctx = { console, setTimeout, clearTimeout, setInterval: () => 0, requestAn
   fetch: () => Promise.reject(new Error('stub')), URLSearchParams, TextDecoder, AbortController, Blob, addEventListener() {}, removeEventListener() {},
   getComputedStyle: () => ({ getPropertyValue: () => '', lineHeight: '20px' }), innerWidth: 1400, innerHeight: 900, confirm: () => false, AudioContext: undefined };
 ctx.URL = { createObjectURL: () => 'blob:x', revokeObjectURL() {} }; ctx.window = ctx; vm.createContext(ctx);
-for (const f of ['highlight.js', 'i18n.js', 'app.js']) vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', f), 'utf8'), ctx, { filename: f });
+for (const f of ['highlight.js', 'i18n.js', 'app.js']) vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'app', 'public', f), 'utf8'), ctx, { filename: f });
 const ev = (s) => vm.runInContext(s, ctx), R = (s) => ev(`routeIntent(${JSON.stringify(s)})`);
 ev("files = ['src/app.js', 'README.md']; tabs = []; activePath = null;");
 
@@ -63,13 +63,30 @@ test('палитра команд и оформление не падают', ()
   ev('applyUi({ ...UI_DEF, chatSide: "left", syntax: "monokai", quickList: "A | b" })');
   assert.equal(ev('uiCfg().asMs'), 1000);
 });
+test('битые настройки из localStorage нормализуются', () => {
+  const c = ev("normalizeCfg({ mode: 'xxx', profile: 'nope', offline: null, online: { preset: 'nope', apiKeys: [' a ', 5, ''] }, theme: 'neon', lang: 'de' })");
+  assert.equal(c.mode, 'offline'); assert.equal(c.profile, 'normal'); assert.equal(c.theme, 'dark'); assert.equal(c.lang, 'ru');
+  assert.equal(c.offline.baseUrl, ev('PRESETS.offline.ollama.baseUrl'));
+  assert.equal(c.offline.model, ev('PRESETS.offline.ollama.model'));
+  assert.equal(c.online.preset, 'deepseek'); assert.deepEqual([...c.online.apiKeys], ['a']);
+  assert.equal(ev('normalizeCfg(null).mode'), 'offline');
+});
 test('подсказки провайдеров не пустые', () => { assert.match(ev("presetNote('online','groq')"), /Groq|бесплат/i); });
 test('дымовой прогон: функции интерфейса вызываются без ошибок', () => {
   ev("cfg = { mode: 'offline', profile: 'normal', theme: 'dark', lang: 'ru', offline: mkEp('offline', 'ollama'), online: mkEp('online', 'deepseek') }");
   ev("chatHist = [{ role: 'user', content: 'привет' }, { role: 'assistant', content: 'Здравствуйте' }]");
   const calls = ["buildQuick()", "renderQo()", "exportChat()", "copyLast()", "showStat(2.5, 400)", "beep()", "keyNotice({ from: 1, index: 2, total: 3, reason: 'limit' })",
     "choosePath('x', [{ path: 'C:/a' }], 'open')", "hlMatch('abc', 'b', false)", "patchHtml('+a\\n-b')", "askUser({ question: 'q', options: ['a'] })", "scheduleRender()", "renderTreeSoon()",
-    "applyUi(UI_DEF)", "readUiForm()", "keysFromForm()", "updateStatus()", "textToolsPrompt()", "systemPrompt(false, true)", "activeTools()", "withCtx('')", "runCmdFor('a.py', true)", "downloadText('a.txt', 'x')"];
+    "applyUi(UI_DEF)", "readUiForm()", "keysFromForm()", "updateStatus()", "textToolsPrompt()", "systemPrompt(false, true)", "activeTools()", "withCtx('')", "runCmdFor('a.py', true)", "downloadText('a.txt', 'x')", "syncActiveNode()"];
   for (const c of calls) { try { ev(c); } catch (e) { assert.fail(c + ' -> ' + e.message); } }
+});
+test('новые помощники: размер, время истории, окружение, клавиши', () => {
+  assert.equal(ev('fmtSize(900)'), '900 Б');
+  assert.match(ev('fmtSize(2048)'), /2 КБ/);
+  assert.match(ev('histTime(Date.now())'), /сегодня|today/);
+  assert.equal(ev('typeof envText'), 'function');
+  assert.ok(ev('keyList().length') >= 17);
+  assert.equal(ev("Object.keys(UI_DEF).includes('notify')"), true);
+  assert.equal(ev('Object.keys(templates()).length'), 0);
 });
 setTimeout(() => process.exit(process.exitCode || 0), 50).unref();

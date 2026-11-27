@@ -42,7 +42,8 @@ function fit(m, hw) {
   return 'no';
 }
 function recommend(models, hw) {
-  const coders = models.filter(m => m.coder).sort((a, b) => a.sizeGB - b.sizeGB);
+  const coders = models.filter(m => m && m.coder).sort((a, b) => (a.sizeGB || 0) - (b.sizeGB || 0));
+  if (!coders.length) return models.length ? (models[0].id || null) : null;
   const good = coders.filter(m => ['gpu', 'ok'].includes(fit(m, hw)));
   if (good.length) return good[good.length - 1].id;
   const any = coders.filter(m => fit(m, hw) !== 'no');

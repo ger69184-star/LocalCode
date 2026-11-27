@@ -10,7 +10,7 @@ const args = process.argv.slice(2);
 const has = (n) => args.includes(n);
 const val = (n) => { const i = args.indexOf(n); return i >= 0 ? args[i + 1] : null; };
 const WIN = process.platform === 'win32', MAC = process.platform === 'darwin';
-const APP = fs.existsSync(path.join(__dirname, 'server.js')) ? __dirname : path.resolve(__dirname, '..');
+const APP = fs.existsSync(path.join(__dirname, '..', 'app', 'server.js')) ? path.resolve(__dirname, '..') : __dirname;
 const DRY = has('--dry-run');
 const say = (...a) => console.log(...a);
 const step = (s) => say('\n\u25B6 ' + s);
@@ -42,11 +42,28 @@ function ollamaBin() {
   return null;
 }
 async function download(url, dest) {
-  const r = await fetch(url); if (!r.ok) throw new Error('HTTP ' + r.status);
-  const total = +r.headers.get('content-length') || 0; let got = 0, last = 0;
+  if (new URL(url).protocol !== 'https:') throw new Error('Разрешены только https-загрузки');
+  const ac = new AbortController();
+  let timer = setTimeout(() => ac.abort(), 60000);          // нет данных минуту — прекращаем, а не висим вечно
   const out = fs.createWriteStream(dest);
-  for await (const chunk of r.body) { out.write(chunk); got += chunk.length; if (total && Date.now() - last > 500) { last = Date.now(); process.stdout.write(`\r  ${(got / 2 ** 20).toFixed(0)} / ${(total / 2 ** 20).toFixed(0)} МБ`); } }
-  await new Promise(r => out.end(r)); say('');
+  out.on('error', () => { try { ac.abort(); } catch {} });
+  try {
+    const r = await fetch(url, { signal: ac.signal }); if (!r.ok) throw new Error('HTTP ' + r.status);
+    if (!/^https:/.test(r.url)) throw new Error('Загрузка перенаправлена на небезопасный адрес');
+    const total = +r.headers.get('content-length') || 0; let got = 0, last = 0;
+    for await (const chunk of r.body) {
+      clearTimeout(timer); timer = setTimeout(() => ac.abort(), 60000);
+      if (!out.write(chunk)) await new Promise(res => out.once('drain', res));   // не держим весь файл в памяти
+      got += chunk.length;
+      if (total && Date.now() - last > 500) { last = Date.now(); process.stdout.write(`\r  ${(got / 2 ** 20).toFixed(0)} / ${(total / 2 ** 20).toFixed(0)} МБ`); }
+    }
+    await new Promise(res => out.end(res));
+    if (out.errored) throw out.errored;
+    say('');
+  } catch (e) {
+    try { out.destroy(); fs.unlinkSync(dest); } catch {}
+    throw e.name === 'AbortError' ? new Error('Нет данных от сервера загрузки (проверьте интернет или VPN)') : e;
+  } finally { clearTimeout(timer); }
 }
 async function installOllama() {
   if (WIN) {
@@ -57,7 +74,7 @@ async function installOllama() {
   } else if (MAC) {
     if (spawnSync('brew', ['--version']).status === 0) run('brew', ['install', 'ollama']);
     else say('  Установите Ollama вручную: https://ollama.com/download и запустите установщик ещё раз.');
-  } else run('sh', ['-c', 'curl -fsSL https://ollama.com/install.sh | sh'], { shell: false });
+  } else run('sh', ['-c', "curl -fsSL --proto '=https' --tlsv1.2 https://ollama.com/install.sh | sh"], { shell: false });
 }
 async function alive() { try { return (await fetch('http://127.0.0.1:11434/api/version', { signal: AbortSignal.timeout(2000) })).ok; } catch { return false; } }
 const tuneEnv = (low) => ({ ...process.env, OLLAMA_NUM_PARALLEL: '1', OLLAMA_MAX_LOADED_MODELS: '1', OLLAMA_KEEP_ALIVE: '30m', ...(low ? { OLLAMA_FLASH_ATTENTION: '1', OLLAMA_KV_CACHE_TYPE: 'q8_0' } : {}) });
@@ -93,7 +110,7 @@ async function main() {
       const gguf = val('--gguf');
       if (gguf) {
         const mf = path.join(os.tmpdir(), 'Modelfile.gguf');
-        fs.writeFileSync(mf, `FROM ${path.resolve(gguf)}\nTEMPLATE """{{- if .System }}<|im_start|>system\n{{ .System }}<|im_end|>\n{{ end }}<|im_start|>user\n{{ .Prompt }}<|im_end|>\n<|im_start|>assistant\n"""\nPARAMETER stop "<|im_end|>"\n`);
+        if (!DRY) fs.writeFileSync(mf, `FROM "${path.resolve(gguf).replace(/"/g, '')}"\nTEMPLATE """{{- if .System }}<|im_start|>system\n{{ .System }}<|im_end|>\n{{ end }}<|im_start|>user\n{{ .Prompt }}<|im_end|>\n<|im_start|>assistant\n"""\nPARAMETER stop "<|im_end|>"\n`);
         base = 'localcode-gguf-base'; ok = run(bin, ['create', base, '-f', mf]).status === 0;
       } else {
         ok = run(bin, ['pull', base]).status === 0;
@@ -111,7 +128,8 @@ async function main() {
 
   step(online ? '1/1  Настройка и ярлыки' : '4/4  Ярлыки запуска и настройки');
   if (!DRY) {
-    const dir = path.join(os.homedir(), '.localcode'); fs.mkdirSync(dir, { recursive: true });
+    const dir = process.env.LOCALCODE_CONFIG_DIR ? path.resolve(process.env.LOCALCODE_CONFIG_DIR) : path.join(os.homedir(), '.localcode');
+    fs.mkdirSync(dir, { recursive: true });
     const f = path.join(dir, 'config.json'); let c = {}; try { c = JSON.parse(fs.readFileSync(f, 'utf8')); } catch {}
     fs.writeFileSync(f, JSON.stringify({ ...c, defaults }, null, 2));
     writeLaunchers(bin, key);
@@ -132,12 +150,12 @@ function writeLaunchers(bin, key) {
   const low = key === 'ultra' || key === 'light';
   if (WIN) {
     const ol = bin && bin !== 'ollama' ? bin : 'ollama';
-    const bat = `@echo off\r\nchcp 65001 >nul\r\ncd /d "%~dp0"\r\n${bin ? `set OLLAMA_NUM_PARALLEL=1\r\nset OLLAMA_MAX_LOADED_MODELS=1\r\nset OLLAMA_KEEP_ALIVE=30m\r\n${low ? 'set OLLAMA_FLASH_ATTENTION=1\r\nset OLLAMA_KV_CACHE_TYPE=q8_0\r\n' : ''}powershell -NoProfile -Command "try{Invoke-WebRequest -UseBasicParsing http://127.0.0.1:11434/api/version -TimeoutSec 2 | Out-Null}catch{Start-Process -WindowStyle Hidden '${ol}' 'serve'}"\r\n` : ''}node server.js --open %*\r\npause\r\n`;
+    const bat = `@echo off\r\nchcp 65001 >nul\r\ncd /d "%~dp0"\r\n${bin ? `set OLLAMA_NUM_PARALLEL=1\r\nset OLLAMA_MAX_LOADED_MODELS=1\r\nset OLLAMA_KEEP_ALIVE=30m\r\n${low ? 'set OLLAMA_FLASH_ATTENTION=1\r\nset OLLAMA_KV_CACHE_TYPE=q8_0\r\n' : ''}powershell -NoProfile -Command "try{Invoke-WebRequest -UseBasicParsing http://127.0.0.1:11434/api/version -TimeoutSec 2 | Out-Null}catch{Start-Process -WindowStyle Hidden '${ol}' 'serve'}"\r\n` : ''}node app/server.js --open %*\r\npause\r\n`;
     const f = path.join(APP, 'LocalCode.bat'); if (!fs.existsSync(f)) { fs.writeFileSync(f, bat); say('  создан', f); }
     const ps = `$d=[Environment]::GetFolderPath('Desktop');$s=(New-Object -ComObject WScript.Shell).CreateShortcut("$d\\LocalCode.lnk");$s.TargetPath='${fs.existsSync(path.join(APP, 'LocalCode.vbs')) ? path.join(APP, 'LocalCode.vbs') : f}';$s.WorkingDirectory='${APP}';$s.Save()`;
     if (spawnSync('powershell', ['-NoProfile', '-Command', ps], { stdio: 'ignore' }).status === 0) say('  ярлык на рабочем столе создан');
   } else {
-    const sh = `#!/usr/bin/env sh\ncd "$(dirname "$0")"\n${bin ? `export OLLAMA_NUM_PARALLEL=1 OLLAMA_MAX_LOADED_MODELS=1 OLLAMA_KEEP_ALIVE=30m${low ? ' OLLAMA_FLASH_ATTENTION=1 OLLAMA_KV_CACHE_TYPE=q8_0' : ''}\ncurl -fs http://127.0.0.1:11434/api/version >/dev/null 2>&1 || (nohup "${bin}" serve >/dev/null 2>&1 &)\nsleep 1\n` : ''}exec node server.js --open "$@"\n`;
+    const sh = `#!/usr/bin/env sh\ncd "$(dirname "$0")"\n${bin ? `export OLLAMA_NUM_PARALLEL=1 OLLAMA_MAX_LOADED_MODELS=1 OLLAMA_KEEP_ALIVE=30m${low ? ' OLLAMA_FLASH_ATTENTION=1 OLLAMA_KV_CACHE_TYPE=q8_0' : ''}\ncurl -fs http://127.0.0.1:11434/api/version >/dev/null 2>&1 || (nohup "${bin}" serve >/dev/null 2>&1 &)\nsleep 1\n` : ''}exec node app/server.js --open "$@"\n`;
     for (const n of MAC ? ['localcode.sh', 'LocalCode.command'] : ['localcode.sh']) { const f = path.join(APP, n); fs.writeFileSync(f, sh, { mode: 0o755 }); say('  создан', f); }
   }
 }

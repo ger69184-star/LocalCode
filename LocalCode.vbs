@@ -5,8 +5,8 @@ Set fso = CreateObject("Scripting.FileSystemObject")
 dir = fso.GetParentFolderName(WScript.ScriptFullName)
 sh.CurrentDirectory = dir
 logp = dir & "\localcode.log"
-If Not fso.FileExists(dir & "\server.js") Then
-  MsgBox "server.js not found in " & dir & vbCrLf & "Unpack the whole archive and run LocalCode.vbs from its folder.", 16, "LocalCode"
+If Not fso.FileExists(dir & "\app\server.js") Then
+  MsgBox "app\server.js not found in " & dir & vbCrLf & "Unpack the whole archive and run LocalCode.vbs from its folder.", 16, "LocalCode"
   WScript.Quit 1
 End If
 ' Node.js must be available
@@ -23,7 +23,7 @@ End If
 On Error Resume Next
 If fso.FileExists(logp) Then fso.DeleteFile logp, True
 On Error GoTo 0
-cmd = "cmd /c node server.js --app >""" & logp & """ 2>&1"
+cmd = "cmd /c node app/server.js --app >""" & logp & """ 2>&1"
 sh.Run cmd, 0, False
 ' wait up to ~15 s until the server reports that it is running
 ok = False

@@ -28,10 +28,10 @@ if defined OLLAMA_EXE (
 )
 
 rem --- 3. Server file
-set "SRV=server.js"
-if not exist "%SRV%" if exist "app\server.js" set "SRV=app\server.js"
+set "SRV=app\server.js"
+if not exist "%SRV%" set "SRV=server.js"
 if not exist "%SRV%" (
-  echo server.js not found in %CD%
+  echo Could not find app\server.js in %CD%
   pause
   exit /b 1
 )

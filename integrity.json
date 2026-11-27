@@ -1,0 +1,16 @@
+{
+  "v": 1,
+  "alg": "ed25519",
+  "app": "LocalCode",
+  "version": "0.9.0",
+  "files": {
+    "server.js": "504e434a1a2dbbf57fd64e38534a22095d2cb70e3dde5c68310c04b299cc1766",
+    "integrity.js": "0c7b3ebb3dcbe399341f4553882c4f4ff0d95d3c80d4edc9c24b5b0a91ddb7b8",
+    "hw.js": "e670ab6751f61cfabc4eeb75263d01497e67efd3c27c5edcf2917973dcae4b02",
+    "public/index.html": "2c8c62bd9dda28b6a95d5a5bb7e8e74f315d2350778d0959debd7b9270ce2d5c",
+    "public/app.js": "1599cf6c5ab8df6487ee5707555389e67a9ecc9a51550d481de8753ef9d8a0bf",
+    "public/i18n.js": "3e711943e22e27111cd23e3064b454f290fa8d0e6f7d2e7b500a71af2bc7805b",
+    "public/highlight.js": "8e18b52051a96a815f5aae3f5e6cd51d20a1353428686de7e075e32352c62846"
+  },
+  "sig": "NUcq8mVxxVwqEiCsB5XpncbjuoqJCbOqbtDqD8F0DbyhlsTMDs_w0Ud_eDBDlZ5KvC7oK3b1Zlx87-CNU5xtCQ"
+}

@@ -1,0 +1,20 @@
+# Журнал и локальные настройки никогда не должны попадать в репозиторий
+localcode.log
+.localcode/
+node_modules/
+
+# Секреты
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+# …но открытый ключ подписи сборок должен попасть в поставку
+!integrity-pub.pem
+# закрытый ключ подписи — никогда
+integrity-keys/
+integrity-private.pem
+
+# портативный режим: настройки рядом с программой
+data/
+portable.txt
