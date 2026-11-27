@@ -1957,7 +1957,10 @@ $('#projBtn').onclick = (e) => { e.stopPropagation(); const r = e.target.getBoun
 /* ================= Управление компьютером ================= */
 async function systemAction(action, extra = {}) {
   const out = await execTool('system', { action, ...extra });
-  if (/^(clipboard_get|info|drives|processes|windows)$/.test(action) && out && !failed(out) && !declined(out)) say('`system: ' + action + '`\n```\n' + String(out).slice(0, 12000) + '\n```');
+  if (out && !failed(out) && !declined(out)) {
+    if (/^(clipboard_get|info|drives|processes|windows)$/.test(action)) say('`system: ' + action + '`\n```\n' + String(out).slice(0, 12000) + '\n```');
+    else toast(String(out).slice(0, 300), 3000);
+  }
   return out;
 }
 $('#sysBtn').onclick = (e) => {
